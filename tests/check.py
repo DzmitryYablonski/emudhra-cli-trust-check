@@ -191,6 +191,65 @@ class Diagnostics(unittest.TestCase):
         self.assertNotIn('Authorization', request.headers)
 
 
+    def test_summary_calls_out_incomplete_and_review_results(self):
+        start = SOURCE.index('if [ "$VULN" -gt 0 ]; then echo "  RESULT:')
+        end = SOURCE.index('if [ -s "$TMP/actions" ]; then', start)
+        for v, i, w, expected in ((0, 1, 0, 'incomplete'), (0, 0, 1, 'review required'),
+                                  (1, 1, 1, 'vulnerable findings'), (0, 0, 0, 'within the reported scope')):
+            out = bash(f'VULN={v}; INCONC={i}; WARN={w}\n' + SOURCE[start:end])
+            self.assertIn(expected, out.stdout)
+
+    def test_stalled_node_version_is_bounded_and_inconclusive(self):
+        with tempfile.TemporaryDirectory() as d:
+            node = Path(d) / 'node'
+            node.write_text('#!/bin/sh\nif [ "$1" = --version ]; then sleep 20; else printf "4\\t0\\t0\\t1\\n"; fi\n')
+            node.chmod(0o700)
+            code = (function('run_timed').replace('run_timed()', 'real_timed()', 1) +
+                    '\nrun_timed(){ shift; real_timed 1 "$@"; }\n'
+                    'TMP=$2; NH=4; TLS_EXPIRED=0; TEST_URLS=(a b c d); CONTROL_URL=e; ACTIVE_NODE=$1; OS=Linux; BREW_PREFIX=/nonexistent\n'
+                    'row(){ echo "$1"; }; short(){ echo "$1"; }; action(){ :; }\n' +
+                    '\n'.join(function(n) for n in ('rank', 'worse', 'ver_ge', 'verdict', 'brief', 'node_fixed', 'check_node')) +
+                    '\ncheck_node "$1" "$1"')
+            out = bash(code, str(node), d, timeout=5)
+            self.assertEqual(out.stdout.strip(), 'INCONCLUSIVE', out.stderr)
+
+
+class CertificateFailures(unittest.TestCase):
+    def setUp(self):
+        self.namespace = {}
+        with mock.patch.dict(os.environ, DISTRUSTED_ROOTS=ROOTS), mock.patch.object(sys, 'argv', ['probe', 'control']):
+            exec(PROBE.split('if CONTROL == "--bundles":', 1)[0], self.namespace)
+
+    def error(self, code):
+        import ssl
+        error = ssl.SSLCertVerificationError(1, 'certificate verify failed')
+        error.verify_code = code
+        return error
+
+    def test_expiry_hostname_and_unknown_errors_never_prove_distrust(self):
+        for code in (9, 10, 62, 7, 999, None):
+            with self.subTest(code=code):
+                self.assertEqual(self.namespace['classify'](self.error(code)), 'E')
+        self.assertEqual(self.namespace['classify'](RuntimeError('CERTIFICATE_VERIFY_FAILED')), 'E')
+
+    def test_typed_trust_failures_survive_requests_style_wrappers(self):
+        for code in (18, 19, 20, 21, 23, 27, 28):
+            error = self.error(code)
+            wrapped = RuntimeError(RuntimeError(error))
+            self.assertEqual(self.namespace['classify'](wrapped), 'B')
+        wrapped = RuntimeError('wrapper'); wrapped.reason = self.error(10)
+        self.assertEqual(self.namespace['classify'](wrapped), 'E')
+        wrapped.reason = wrapped
+        self.assertEqual(self.namespace['classify'](wrapped), 'E')
+
+    def test_expired_or_mismatched_hosts_make_the_tally_inconclusive(self):
+        self.namespace['HOSTS'] = ['a', 'b', 'c', 'd']
+        for code in (10, 62):
+            tally = self.namespace['tally'](lambda url: 'C' if url == 'control' else self.namespace['classify'](self.error(code)))
+            out = bash('NH=4; TLS_EXPIRED=0\n' + function('verdict') + '\nverdict "$@"', *tally)
+            self.assertEqual(out.stdout.strip(), 'INCONCLUSIVE')
+
+
 class Java(unittest.TestCase):
     def test_failed_keytool_never_passes_partial_fingerprints(self):
         with tempfile.TemporaryDirectory() as d:
@@ -205,7 +264,7 @@ class Java(unittest.TestCase):
             self.assertEqual(p.stdout.strip(), 'empty', p.stderr)
 
     def test_unavailable_java_inspections_are_inconclusive(self):
-        start = SOURCE.index('    jv=$("$jh/bin/java"')
+        start = SOURCE.index('    jv=$(run_timed 10 "$jh/bin/java"')
         end = SOURCE.index('  done 3< "$TMP/jvms"', start)
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -214,7 +273,7 @@ class Java(unittest.TestCase):
             java.write_text('#!/bin/sh\necho \'openjdk version "21.0.13"\'\n')
             java.chmod(0o700)
             code = ('TMP=$1; jh=$1; OS=Linux\nrow(){ echo "$1"; }\naction(){ :; }\nshort(){ echo "$1"; }\n' +
-                    function('rank') + '\n' + function('worse') + '\n' + function('ver_ge') + '\n' +
+                    function('run_timed') + '\n' + function('rank') + '\n' + function('worse') + '\n' + function('ver_ge') + '\n' +
                     SOURCE[start:end])
             p = bash(code, d)
             self.assertEqual(p.stdout.strip(), 'INCONCLUSIVE', p.stderr)

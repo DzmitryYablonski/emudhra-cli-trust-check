@@ -80,7 +80,7 @@ Verdicts:
   OK            rejects all 4 test chains and still reaches https://pypi.org
   VULNERABLE    accepts a compromised chain, or carries a trust store that still has the roots
   OUTDATED      older than the fixed release, or a finding to review
-  INCONCLUSIVE  a test host or the control site was unreachable: check the network, run again
+  INCONCLUSIVE  a probe could not establish a valid result: inspect the affected rows
   BROKEN        the interpreter or venv could not run the probe
 
 Safety: read-only, no sudo, no installs. Network use: TLS requests to the 4 test hosts, plus
@@ -198,9 +198,6 @@ brief() { # brief VERDICT REJECTED CONTROL_OK
   esac
 }
 
-BREW_PREFIX="/nonexistent"
-has brew && BREW_PREFIX=$(brew --prefix 2>/dev/null)
-
 # ---------------------------------------------------------------- probes
 
 run_timed() {
@@ -219,18 +216,21 @@ run_timed() {
   )
 }
 
+BREW_PREFIX="/nonexistent"
+has brew && { BREW_PREFIX=$(run_timed 10 brew --prefix 2>/dev/null) || BREW_PREFIX="/nonexistent"; }
+
 git_tls() { # Keep TLS/proxy choices, exclude credentials, cookies, hooks and URL rewrites.
   local url="$1" key value
   # Empty Authorization suppresses automatic HTTP auth even on curl versions predating NETRC.
   local args=(-c credential.helper= -c credential.interactive=false -c core.askPass=
     -c http.extraHeader=Authorization: -c http.followRedirects=false -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10)
-  git config --list >/dev/null 2>&1 || return 2
+  run_timed 5 git config --list >/dev/null 2>&1 || return 2
   for key in http.sslVerify http.sslCAInfo http.sslCAPath http.sslBackend http.sslVersion \
              http.schannelUseSSLCAInfo http.schannelCheckRevoke http.proxy http.proxySSLCAInfo \
              http.proxySSLCAPath http.proxySSLVerify; do
     case "$key" in
-      *CAInfo|*CAPath) value=$(git config --path --get-urlmatch "$key" "$url" 2>/dev/null) || continue ;;
-      *) value=$(git config --get-urlmatch "$key" "$url" 2>/dev/null) || continue ;;
+      *CAInfo|*CAPath) value=$(run_timed 5 git config --path --get-urlmatch "$key" "$url" 2>/dev/null) || continue ;;
+      *) value=$(run_timed 5 git config --get-urlmatch "$key" "$url" 2>/dev/null) || continue ;;
     esac
     args+=(-c "$key=$value")
   done
@@ -251,8 +251,6 @@ import sys
 TIMEOUT = 10
 CONTROL = sys.argv[1]
 HOSTS = sys.argv[2:]
-CERT_MARKERS = ("CERTIFICATE_VERIFY_FAILED", "certificate verify failed", "revoked",
-                "unable to get local issuer certificate")
 # "SHA256:name" lines from the shell's DISTRUSTED_ROOTS, the one list every check uses.
 DISTRUSTED = {}
 for entry in os.environ.get("DISTRUSTED_ROOTS", "").split():
@@ -317,8 +315,20 @@ def botocore_info():
 
 
 def classify(exc):
-    text = "{!r} {}".format(exc, exc)
-    return "B" if any(marker in text for marker in CERT_MARKERS) else "E"
+    # Trust failures only: dates, hostname mismatches and unknown errors are inconclusive.
+    pending, seen = [exc], set()
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        if isinstance(error, getattr(ssl, "SSLCertVerificationError", ssl.SSLError)):
+            # OpenSSL: self-signed/issuer failures, revocation, untrusted/rejected certificate.
+            return "B" if getattr(error, "verify_code", None) in (18, 19, 20, 21, 23, 27, 28) else "E"
+        links = [getattr(error, name, None) for name in ("reason", "__cause__", "__context__")]
+        pending.extend(item for item in links + list(getattr(error, "args", ()))
+                       if isinstance(item, BaseException))
+    return "E"
 
 
 def via_stdlib(url):
@@ -501,7 +511,7 @@ py_candidates() {
     ls -1 "$HOME"/.pyenv/versions/*/bin/python3 2>/dev/null
     ls -1 "$HOME"/miniconda3/bin/python3 "$HOME"/anaconda3/bin/python3 "$HOME"/miniforge3/bin/python3 2>/dev/null
     # uv prints paths relative to the current directory when it can, so make them absolute.
-    has uv && uv python list --only-installed --managed-python --no-cache 2>/dev/null </dev/null \
+    has uv && run_timed 15 uv python list --only-installed --managed-python --no-cache 2>/dev/null </dev/null \
       | awk -v pwd="$PWD" '{ p = $2; if (substr(p, 1, 1) != "/") p = pwd "/" p; print p }'
   } | awk 'NF && !seen[$0]++'
 }
@@ -609,12 +619,12 @@ ACTIVE_NODE=""; ACTIVE_NODE_BAD=0; GOOD_BREW_NODE=""
 
 check_node() { # check_node NODE RESOLVED_PATH
   local n="$1" rp="$2" ver maj fixed out b c e ctl v where det note=""
-  ver=$("$n" --version 2>/dev/null </dev/null)
-  out=$("$n" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
+  ver=$(run_timed 10 "$n" --version 2>/dev/null </dev/null)
+  out=$(run_timed 70 "$n" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
   # An old Node exits at startup on a NODE_OPTIONS flag it does not know: probe it without them.
   if [ -z "$out" ] && [ -n "${NODE_OPTIONS:-}" ]; then
-    ver=$(env -u NODE_OPTIONS "$n" --version 2>/dev/null </dev/null)
-    out=$(env -u NODE_OPTIONS "$n" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
+    ver=$(run_timed 10 env -u NODE_OPTIONS "$n" --version 2>/dev/null </dev/null)
+    out=$(run_timed 70 env -u NODE_OPTIONS "$n" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
     [ -n "$out" ] && note=" (probed without NODE_OPTIONS, which this Node rejects)"
   fi
   ver=${ver#v}
@@ -626,7 +636,8 @@ check_node() { # check_node NODE RESOLVED_PATH
   else where="not in PATH"; fi
   det="TLS $(brief "$v" "$b" "$ctl")$note"
   maj=${ver%%.*}; fixed=$(node_fixed "$maj")
-  if [ -z "$fixed" ]; then v=$(worse "$v" OUTDATED); det="$det | v$maj has no fixed release, use 22/24/26"
+  if [ -z "$ver" ]; then v=$(worse "$v" INCONCLUSIVE); det="$det | version unavailable or timed out"
+  elif [ -z "$fixed" ]; then v=$(worse "$v" OUTDATED); det="$det | v$maj has no fixed release, use 22/24/26"
   elif ! ver_ge "$ver" "$fixed"; then v=$(worse "$v" OUTDATED); det="$det | fixed in $fixed"; fi
   row "$v" "node $ver  $(short "$n")  [$where]" "$det"
   if [ "$v" = OK ]; then
@@ -673,6 +684,7 @@ roots_in_fps() { # roots_in_fps FILE: FILE holds one SHA-256 per line; prints cl
     END { print (out ? out : "clean") }' "$1" "$TMP/distrusted.txt"
 }
 
+# shellcheck disable=SC2329  # invoked indirectly through run_timed in bundle_check
 bundle_roots_openssl() { # bundle_roots_openssl FILE: the Python checker's answer, via the openssl CLI
   local dir="$TMP/split" c invalid=0
   rm -rf "$dir"; mkdir -p "$dir"
@@ -687,8 +699,8 @@ bundle_roots_openssl() { # bundle_roots_openssl FILE: the Python checker's answe
 }
 
 bundle_check() { # bundle_check FILE: clean, empty, ROOT+ROOT, or "" when neither python3 nor openssl can read it
-  if [ -n "$BUNDLE_PY" ]; then "$BUNDLE_PY" -I "$TMP/probe.py" --bundles "$1" 2>/dev/null </dev/null | cut -f2
-  elif has openssl; then bundle_roots_openssl "$1"; fi
+  if [ -n "$BUNDLE_PY" ]; then run_timed 20 "$BUNDLE_PY" -I "$TMP/probe.py" --bundles "$1" 2>/dev/null </dev/null | cut -f2
+  elif has openssl; then run_timed 30 bundle_roots_openssl "$1"; fi
 }
 
 java_store_roots() { # java_store_roots STORE KEYTOOL: clean, empty or ROOT+ROOT
@@ -733,7 +745,7 @@ public class T {
 JAVA
 
 brew_affected_installed() {
-  brew list --formula -1 2>/dev/null | grep -E '^(ca-certificates|curl|git|uv|node(@[0-9]+)?|python@3\.[0-9]+)$' | tr '\n' ' '
+  run_timed 20 brew list --formula -1 2>/dev/null | awk '/^(ca-certificates|curl|git|uv|node(@[0-9]+)?|python@3\.[0-9]+)$/ {print}' | tr '\n' ' '
 }
 
 # ---------------------------------------------------------------- report
@@ -763,12 +775,13 @@ done
 
 section "Homebrew"
 if has brew; then
-  list=$(brew_affected_installed)
+  list=$(brew_affected_installed) || row INCONCLUSIVE "Homebrew inventory" "unavailable or timed out"
   if [ -n "$list" ]; then
     read -r -a brew_formulae <<< "$list"
-    brew list --formula --versions "${brew_formulae[@]}" 2>/dev/null | sed 's/^/  /'
-    outdated=$(brew outdated --formula --verbose "${brew_formulae[@]}" 2>/dev/null)
-    if [ -n "$outdated" ]; then
+    run_timed 20 brew list --formula --versions "${brew_formulae[@]}" 2>/dev/null | sed 's/^/  /'
+    if ! outdated=$(run_timed 30 brew outdated --formula --verbose "${brew_formulae[@]}" 2>/dev/null); then
+      row INCONCLUSIVE "Homebrew metadata" "unavailable or timed out"
+    elif [ -n "$outdated" ]; then
       row OUTDATED "affected formulae" "$(echo "$outdated" | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
       action "brew update && brew upgrade $(echo "$outdated" | awk '{print $1}' | tr '\n' ' ')"
     else
@@ -785,7 +798,7 @@ BUNDLE_PY=""; CLEAN_BUNDLE=""
 while IFS= read -r p <&3; do
   [ -x "$p" ] || continue
   if [ "$OS" = Darwin ] && [ "$p" = /usr/bin/python3 ] && ! xcode-select -p >/dev/null 2>&1; then continue; fi
-  if "$p" -I -c 'import hashlib, ssl' >/dev/null 2>&1 </dev/null; then BUNDLE_PY=$p; break; fi
+  if run_timed 10 "$p" -I -c 'import hashlib, ssl' >/dev/null 2>&1 </dev/null; then BUNDLE_PY=$p; break; fi
 done 3<<EOF
 $(py_candidates)
 EOF
@@ -819,7 +832,7 @@ for cb in /usr/bin/curl "$BREW_PREFIX/opt/curl/bin/curl"; do
   [ -x "$cb" ] || continue
   read -r b c e ctl <<< "$(curl_probe "$cb")"
   v=$(verdict "$b" "$c" "$e" "$ctl")
-  row "$v" "curl $("$cb" --version 2>/dev/null | awk 'NR == 1 {print $2}')  $(short "$cb")" "TLS $(brief "$v" "$b" "$ctl")"
+  row "$v" "curl $(run_timed 10 "$cb" --version 2>/dev/null | awk 'NR == 1 {print $2}')  $(short "$cb")" "TLS $(brief "$v" "$b" "$ctl")"
   if [ "$v" = VULNERABLE ]; then
     case "$cb" in
       /usr/bin/curl)
@@ -835,13 +848,13 @@ section "git"
 if has git; then
   read -r b c e ctl <<< "$(git_probe)"
   v=$(verdict "$b" "$c" "$e" "$ctl")
-  row "$v" "git $(git --version | awk '{print $3}')  $(short "$(command -v git)")" "TLS $(brief "$v" "$b" "$ctl")"
+  row "$v" "git $(run_timed 10 git --version | awk '{print $3}')  $(short "$(command -v git)")" "TLS $(brief "$v" "$b" "$ctl")"
   if [ "$v" = VULNERABLE ]; then
     if [ "$OS" = Darwin ]; then action "git accepts the chains: brew upgrade git ca-certificates curl (Homebrew git) or install macOS updates (Apple git)"
     else action "git accepts the chains: $(ca_fix_hint "the emSign/AAA roots")$(has brew && echo " (Homebrew git: brew upgrade git ca-certificates)")"; fi
   fi
   # git treats false/no/off/0 as off; --get-regexp prints "key value".
-  insecure=$( { git config --global --get-regexp '^http\..*sslverify$'; git config --system --get-regexp '^http\..*sslverify$'; } 2>/dev/null | grep -iE '[[:space:]](false|no|off|0)$')
+  insecure=$( { run_timed 5 git config --global --get-regexp '^http\..*sslverify$'; run_timed 5 git config --system --get-regexp '^http\..*sslverify$'; } 2>/dev/null | grep -iE '[[:space:]](false|no|off|0)$')
   if [ -n "$insecure" ]; then
     row VULNERABLE "git config" "TLS verification is disabled in a global/system git setting (values redacted)"
     action "Remove http.sslVerify=false from your git config (git config --global --unset http.sslVerify)"
@@ -867,8 +880,9 @@ EOF
 
 section "uv"
 if has uv; then
-  uvv=$(uv --version 2>/dev/null | awk '{print $2}')
-  if ver_ge "$uvv" "$FIXED_UV"; then
+  uvv=$(run_timed 10 uv --version 2>/dev/null | awk '{print $2}')
+  if [ -z "$uvv" ]; then row INCONCLUSIVE "uv" "version unavailable or timed out"
+  elif ver_ge "$uvv" "$FIXED_UV"; then
     row VERSION_OK "uv $uvv" "its bundled root store is fixed from $FIXED_UV"
   else
     row VULNERABLE "uv $uvv" "uv ships its own root store; fixed in $FIXED_UV"
@@ -970,7 +984,7 @@ done < "$TMP/jvms.raw" | awk '!s[$0]++' > "$TMP/jvms"
 if [ -s "$TMP/jvms" ]; then
   while IFS= read -r jh <&3; do
     [ -x "$jh/bin/java" ] || continue
-    jv=$("$jh/bin/java" -version 2>&1 </dev/null | awk -F'"' '/version/ {print $2; exit}')
+    jv=$(run_timed 10 "$jh/bin/java" -version 2>&1 </dev/null | awk -F'"' '/version/ {print $2; exit}')
     case "$jv" in
       1.8.0_*) cmp="8.0.${jv#1.8.0_}"; fixed="8.0.511"; shown="8u511" ;;
       *) cmp="$jv"
@@ -1045,10 +1059,11 @@ fi
 
 section "Go (version check only)"
 if has go; then
-  gv=$(go version 2>/dev/null | awk '{print $3}'); gv=${gv#go}
+  gv=$(run_timed 10 go version 2>/dev/null | awk '{print $3}'); gv=${gv#go}
   # 1.26.x needs 1.26.10; anything else is compared with 1.27.3, so 1.28+ passes and <1.26 does not.
   case "$gv" in 1.26.*) fixed=1.26.10 ;; *) fixed=1.27.3 ;; esac
-  if ver_ge "$gv" "$fixed"; then row VERSION_OK "go $gv" "fixed from $fixed"
+  if [ -z "$gv" ]; then row INCONCLUSIVE "Go" "version unavailable or timed out"
+  elif ver_ge "$gv" "$fixed"; then row VERSION_OK "go $gv" "fixed from $fixed"
   else
     if [ "$OS" = Darwin ]; then gnote="on macOS Go uses the system verifier; matters for Linux builds"
     else gnote="on Linux Go reads the system CA bundle, so also keep ca-certificates updated"; fi
@@ -1064,8 +1079,8 @@ app_check() { # app_check NAME FIXED BUNDLE_NAME
   local app v
   for app in "/Applications/$3" "$HOME/Applications/$3"; do
     [ -d "$app" ] || continue
-    v=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null)
-    [ -n "$v" ] || continue
+    v=$(run_timed 5 /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null)
+    [ -n "$v" ] || { row INCONCLUSIVE "$1" "version unavailable or timed out"; return; }
     if ver_ge "$v" "$2"; then row VERSION_OK "$1 $v" "fixed from $2"
     else row OUTDATED "$1 $v" "fixed in $2"; action "Update $1 to $2 or later (built-in updater)"; fi
     return
@@ -1077,16 +1092,17 @@ if [ "$OS" = Darwin ]; then
   app_check "Obsidian" "$FIXED_OBSIDIAN" "Obsidian.app"
 else
   if has code; then
-    cv=$(code --version 2>/dev/null </dev/null | head -1)
-    if [ -z "$cv" ]; then :
+    cv=$(run_timed 10 code --version 2>/dev/null </dev/null | head -1)
+    if [ -z "$cv" ]; then row INCONCLUSIVE "Visual Studio Code" "version unavailable or timed out"
     elif ver_ge "$cv" "$FIXED_VSCODE"; then row VERSION_OK "Visual Studio Code $cv" "fixed from $FIXED_VSCODE"
     else row OUTDATED "Visual Studio Code $cv" "fixed in $FIXED_VSCODE"; action "Update Visual Studio Code to $FIXED_VSCODE or later (distro package or built-in updater)"; fi
   fi
   echo "  Docker Desktop and Obsidian are not checked on Linux: compare their versions with the tracker by hand."
 fi
 if has claude; then
-  cv=$(claude --version 2>/dev/null </dev/null | awk '{print $1}')
-  if ver_ge "$cv" "$FIXED_CLAUDE"; then row VERSION_OK "Claude Code $cv" "fixed from $FIXED_CLAUDE"
+  cv=$(run_timed 10 claude --version 2>/dev/null </dev/null | awk '{print $1}')
+  if [ -z "$cv" ]; then row INCONCLUSIVE "Claude Code" "version unavailable or timed out"
+  elif ver_ge "$cv" "$FIXED_CLAUDE"; then row VERSION_OK "Claude Code $cv" "fixed from $FIXED_CLAUDE"
   else row OUTDATED "Claude Code $cv" "fixed in $FIXED_CLAUDE"; action "Update Claude Code (claude update)"; fi
 fi
 echo "  Other Electron apps carry their own Chromium: keep them updated."
@@ -1143,12 +1159,16 @@ fi
 
 section "Summary"
 printf '  vulnerable: %s   outdated/review: %s   inconclusive: %s\n' "$VULN" "$WARN" "$INCONC"
+if [ "$VULN" -gt 0 ]; then echo "  RESULT: vulnerable findings; apply the suggested fixes, then rerun."
+elif [ "$INCONC" -gt 0 ]; then echo "  RESULT: incomplete; inspect the affected rows and rerun. Default exit 0 is not an all-clear."
+elif [ "$WARN" -gt 0 ]; then echo "  RESULT: review required; inspect the findings and rerun."
+else echo "  RESULT: all performed checks passed within the reported scope."; fi
 if [ -s "$TMP/actions" ]; then
   echo
   echo "  Suggested fixes (this script changes nothing; run these yourself):"
   awk '!seen[$0]++ {print "  - " $0}' "$TMP/actions"
 fi
-[ "$INCONC" -gt 0 ] && echo "  Inconclusive rows mean a test host or the control site was unreachable: check the network and re-run."
+[ "$INCONC" -gt 0 ] && echo "  Some checks could not establish a result: inspect the affected rows and rerun."
 [ "$VULN" -gt 0 ] && exit 1
 if [ "$STRICT" -eq 1 ]; then
   [ "$INCONC" -gt 0 ] && exit 3
