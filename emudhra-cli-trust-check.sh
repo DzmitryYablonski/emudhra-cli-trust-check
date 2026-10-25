@@ -9,7 +9,7 @@ umask 077
 export HOMEBREW_NO_AUTO_UPDATE=1
 
 # Versions 1 to 6 were used internally (certificate-check-vN.sh); 7.0.0 is the first public release.
-VERSION="7.0.0"
+VERSION="7.1.0"
 # The fixed versions below were checked on this date; newer releases may have shipped since.
 AS_OF="2026-10-24"
 TRACKER="https://emudhra.we-have-a-problem.com"
@@ -67,6 +67,7 @@ What it checks:
   curl, git, every Python interpreter (stdlib TLS, pip, certifi, requests), every Node.js and
   the AWS CLI are tested against the incident's 4 test chains. uv, AWS CLI v2, Java, Go,
   VS Code, Docker Desktop, Obsidian and Claude Code are compared with their fixed releases.
+  ~/.curlrc is checked separately for insecure (-k) and cacert/capath, since the probes skip it.
   Trust stores are judged by content: the system CA bundles, certifi, pip's vendored certifi,
   botocore's own bundle (used when certifi is absent), the AWS CLI's bundle and every Java
   cacerts are searched for the 4 distrusted roots by SHA-256, so a distro-patched certifi that
@@ -402,6 +403,37 @@ setTimeout(() => process.exit(1), 65000).unref();
 JS
 
 py_probe() { run_timed 125 "$1" -I "$TMP/probe.py" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1; }
+
+curlrc_file() { # the config curl reads by default: first of $CURL_HOME/.curlrc, $XDG_CONFIG_HOME/curlrc, ~/.curlrc
+  local f
+  for f in ${CURL_HOME:+"$CURL_HOME/.curlrc"} ${XDG_CONFIG_HOME:+"$XDG_CONFIG_HOME/curlrc"} "$HOME/.curlrc"; do
+    if [ -f "$f" ]; then printf '%s\n' "$f"; return; fi
+  done
+}
+
+check_curlrc() { # The probes run with -q so .curlrc cannot send credentials to the test hosts; judge it here.
+  local f v=OK det="" ca res
+  f=$(curlrc_file)
+  [ -n "$f" ] || return 0
+  if grep -Eq '^[[:space:]]*((--)?(proxy-)?insecure([[:space:]=:]|$)|-k([[:space:]]|$))' "$f"; then
+    v=VULNERABLE; det="turns off certificate verification for every curl call"
+    action "Remove insecure (or -k) from $(short "$f")"
+  fi
+  ca=$(sed -n 's/^[[:space:]]*\(--\)\{0,1\}cacert[[:space:]=:]\{1,\}//p' "$f" | tail -1 | tr -d '"')
+  if [ -n "$ca" ]; then
+    res=""; [ -f "$ca" ] && res=$(bundle_check "$ca")
+    case "$res" in
+      clean) det="${det:+$det | }cacert $(short "$ca") clean" ;;
+      ""|empty) v=$(worse "$v" OUTDATED); det="${det:+$det | }cacert $(short "$ca") could not be checked" ;;
+      *) v=$(worse "$v" VULNERABLE); det="${det:+$det | }cacert $(short "$ca") trusts $res"
+         action "$(short "$f") points curl at $(short "$ca"), which trusts $res: remove the cacert line or point it at a clean bundle" ;;
+    esac
+  fi
+  if grep -Eq '^[[:space:]]*(--)?capath([[:space:]=:]|$)' "$f"; then
+    v=$(worse "$v" OUTDATED); det="${det:+$det | }capath is set: check that directory by hand"
+  fi
+  row "$v" "$(short "$f")" "${det:-no certificate overrides}"
+}
 
 curl_probe() { # prints: rejected connected errors control_ok
   local bin="$1" u rc b=0 c=0 e=0 ctl=0
@@ -782,7 +814,7 @@ while IFS= read -r bf <&3; do
 done 3< "$TMP/bundles"
 
 section "curl"
-echo "  without .curlrc; proxy and CA environment settings apply"
+echo "  probes skip .curlrc (checked below); proxy and CA environment settings apply"
 for cb in /usr/bin/curl "$BREW_PREFIX/opt/curl/bin/curl"; do
   [ -x "$cb" ] || continue
   read -r b c e ctl <<< "$(curl_probe "$cb")"
@@ -797,6 +829,7 @@ for cb in /usr/bin/curl "$BREW_PREFIX/opt/curl/bin/curl"; do
     esac
   fi
 done
+check_curlrc
 
 section "git"
 if has git; then

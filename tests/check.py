@@ -299,5 +299,47 @@ class Redaction(unittest.TestCase):
             self.assertIn('INCONCLUSIVE', self.run_scan(Path(d) / 'missing', Path(d)).stdout)
 
 
+class Curlrc(unittest.TestCase):
+    """curl probes run with -q, so an insecure or custom-CA .curlrc must be reported on its own."""
+
+    def check(self, home, contents=None, bundle_result='clean', curl_home=''):
+        if contents is not None:
+            (home / '.curlrc').write_text(contents)
+        code = ('export BUNDLE_RESULT=$2 HOME=$1 CURL_HOME=$3; unset XDG_CONFIG_HOME\n'
+                '[ -n "$CURL_HOME" ] || unset CURL_HOME\n'
+                'row(){ printf "%s|%s\\n" "$1" "$3"; }\naction(){ :; }\nshort(){ printf "%s" "$1"; }\n'
+                'bundle_check(){ printf "%s" "$BUNDLE_RESULT"; }\n' +
+                function('rank') + '\n' + function('worse') + '\n' +
+                function('curlrc_file') + '\n' + function('check_curlrc') + '\ncheck_curlrc')
+        p = bash(code, str(home), bundle_result, curl_home)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout.strip()
+
+    def test_insecure_settings_are_vulnerable(self):
+        for contents in ('insecure\n', '--insecure\n', '-k\n', 'proxy-insecure\n'):
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as d:
+                self.assertTrue(self.check(Path(d), contents).startswith('VULNERABLE|'))
+
+    def test_plain_or_missing_config_passes(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(self.check(Path(d)), '')
+            self.assertEqual(self.check(Path(d), '# insecure\nsilent\n'), 'OK|no certificate overrides')
+
+    def test_cacert_bundle_is_judged_by_content(self):
+        with tempfile.TemporaryDirectory() as d:
+            bundle = Path(d) / 'old bundle.pem'
+            bundle.write_text('placeholder')
+            self.assertEqual(self.check(Path(d), f'cacert = "{bundle}"\n', 'emSign-ECC-G3'),
+                             f'VULNERABLE|cacert {bundle} trusts emSign-ECC-G3')
+            self.assertEqual(self.check(Path(d), f'cacert {bundle}\n', 'clean'), f'OK|cacert {bundle} clean')
+            self.assertTrue(self.check(Path(d), 'cacert /nonexistent.pem\n').startswith('OUTDATED|'))
+            self.assertTrue(self.check(Path(d), 'capath /etc/ssl/certs\n').startswith('OUTDATED|'))
+
+    def test_curl_home_takes_precedence(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as c:
+            (Path(c) / '.curlrc').write_text('silent\n')
+            self.assertEqual(self.check(Path(d), 'insecure\n', curl_home=c), 'OK|no certificate overrides')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

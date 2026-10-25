@@ -14,9 +14,9 @@ The whole tool is one file: you download one file, check one hash, read one file
 - **One self-contained Bash file for macOS and Linux.** No modules, installers or helper files. A release ships only `emudhra-cli-trust-check.sh` and `SHA256SUMS`, and `SHA256SUMS` covers only that script.
 - **Read-only.** It never installs, updates, repairs or reconfigures anything. It prints the fix commands, and you decide whether to run them.
 - **Limited network use.** It connects only to the incident's test hosts and the control sites listed under [Limits](#limits). There is no telemetry, and no credentials are sent.
-- **Readable in one sitting.** It stays at about 1,000 lines of Bash, so a new check has to be worth the lines it adds.
+- **Readable in one sitting.** It stays under 1,200 lines of Bash, so a new check has to be worth the lines it adds.
 - **Windows is not on `main`** until it can be tested on Windows.
-- **Everything else is for development.** If the repository gains tests or CI, they are there for maintainers. You don't need to read or run them to use the tool.
+- **Everything else is for development.** The tests and CI are there for maintainers. You don't need to read or run them to use the tool.
 
 Contributions are welcome when they follow these rules. Please send focused pull requests, one topic each.
 
@@ -31,7 +31,7 @@ Contributions are welcome when they follow these rules. Please send focused pull
 
 | Area | How |
 | --- | --- |
-| curl, git | Real TLS connections to the incident's 4 test hosts |
+| curl, git | Real TLS connections to the incident's 4 test hosts; `~/.curlrc` checked for `insecure` and `cacert` |
 | Every Python it finds (PATH, Homebrew, python.org, pyenv, conda, uv-managed) | stdlib and `requests` TLS tests; pip's vendored certifi, certifi, and botocore's own bundle checked by SHA-256 |
 | Every Node.js it finds | TLS test and version |
 | AWS CLI (v1 and v2) | TLS test with unsigned requests; for v2, also the content of its bundled `cacert.pem` and the version |
@@ -60,7 +60,7 @@ This incident is about TLS trust, so get the script over a channel you trust rat
    bash emudhra-cli-trust-check.sh --strict  # also fail on incomplete/outdated checks
    ```
 
-It can take several minutes, depending on discovered tools and virtualenvs, and needs bash 3.2 or later, so the default macOS bash works. Content checks use `python3` or, failing that, `openssl`.
+It takes 20 to 60 seconds, longer with `--scan` over large folders, and needs bash 3.2 or later, so the default macOS bash works. Content checks use `python3` or, failing that, `openssl`.
 
 ## Verdicts and exit codes
 
@@ -77,13 +77,15 @@ The exit code is `0` when nothing is vulnerable, `1` when something is, and `2` 
 
 ## Example
 
-The `amazon/aws-cli:latest` container on 2026-10-24, trimmed:
+The `amazon/aws-cli:latest` container on 2026-10-25, trimmed:
 
 ```text
-== eMudhra CA compromise: Linux check (read-only), emudhra-cli-trust-check 7.0.0 ==
-  Amazon Linux 2023.12.20261021 | 2026-10-24 21:29 | fixed versions as of 2026-10-24
+== eMudhra CA compromise: Linux check (read-only), emudhra-cli-trust-check 7.1.0 ==
+  Amazon Linux 2023.12.20261021 | 2026-10-25 11:12 | fixed versions as of 2026-10-24
   tracker: https://emudhra.we-have-a-problem.com
-  OK = rejects all 4 test chains and still reaches https://pypi.org/
+  OK (TLS) = rejects all 4 test chains and still reaches https://pypi.org/
+  VERSION_OK = version check only; bundle/content checks are labelled separately
+  Scope: discovered tools only; browsers, containers and all project environments are not covered by default
 ...
 == System CA bundles (content) ==
   VULNERABLE   /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
@@ -159,6 +161,7 @@ This one focuses on the CLI tools and runtimes on a developer machine, and tests
 
 ## Version history
 
+- **7.1.0** (2026-10-25): diagnostic hardening. Incomplete probes, malformed bundles and failed Java checks no longer pass. Probes have time limits and no longer pick up your git credentials, `.netrc` or `.curlrc`, and `~/.curlrc` is checked on its own for `insecure` and `cacert`. `--scan` prints only file names and line numbers. Environment variables that turn TLS verification off are reported. `VERSION_OK` marks version-only checks, and `--strict` adds exit codes 3 and 4. Regression tests and CI were added.
 - **7.0.0** (2026-10-24): the first public release. Compared with v6 it adds the AWS CLI check (TLS test, bundled `cacert.pem` and version) and botocore's fallback bundle in venvs without certifi. TLS tests also stop reporting OK once the test certificates expire.
 - **1 to 6:** used internally as `certificate-check-vN.sh` before the public release.
 
@@ -169,7 +172,7 @@ Tests and CI are development tooling only: `python3 tests/check.py`, `shellcheck
 ## Credits
 
 The test hosts and the incident data come from the [eMudhra incident tracker](https://emudhra.we-have-a-problem.com/).
-Stanislav Stolberg contributed diagnostic hardening, regression tests and CI.
+[Stanislav Stolberg](https://github.com/stanistolberg) contributed diagnostic hardening, regression tests and CI.
 
 <!-- TODO before publishing: credit the contributor who added Linux support. -->
 
