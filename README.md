@@ -2,6 +2,8 @@
 
 A read-only check for macOS and Linux. It tells you whether anything on your machine still trusts the compromised eMudhra (emSign) CA chains. Browsers are already protected. Command-line tools and language runtimes often carry their own trust stores, and many of them are not.
 
+**Windows:** [Separate experimental PowerShell checker](https://github.com/stanistolberg/emudhra-windows-trust-check), maintained by Stanislav Stolberg. It is read-only and is not included in this Bash release.
+
 ```bash
 bash emudhra-cli-trust-check.sh                 # check this machine
 bash emudhra-cli-trust-check.sh --scan ~/code   # also every virtualenv under ~/code
