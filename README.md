@@ -57,21 +57,23 @@ This incident is about TLS trust, so get the script over a channel you trust rat
    bash emudhra-cli-trust-check.sh
    bash emudhra-cli-trust-check.sh --scan ~/code --scan ~/work
    bash emudhra-cli-trust-check.sh --help
+   bash emudhra-cli-trust-check.sh --strict  # also fail on incomplete/outdated checks
    ```
 
-It takes 20 to 60 seconds and needs bash 3.2 or later, so the default macOS bash works. Content checks use `python3` or, failing that, `openssl`.
+It can take several minutes, depending on discovered tools and virtualenvs, and needs bash 3.2 or later, so the default macOS bash works. Content checks use `python3` or, failing that, `openssl`.
 
 ## Verdicts and exit codes
 
 | Verdict | Meaning |
 | --- | --- |
 | `OK` | Rejects all 4 test chains and still reaches pypi.org; trust store content is clean |
+| `VERSION_OK` | Version check passed; not a live TLS test |
 | `VULNERABLE` | Accepts a compromised chain, or a trust store it uses still holds one of the roots |
 | `OUTDATED` | Older than the fixed release, or a finding to review |
 | `INCONCLUSIVE` | A test host or the control site was unreachable. Check the network and run it again |
 | `BROKEN` | The interpreter or venv could not run the probe |
 
-The exit code is `0` when nothing is vulnerable, `1` when something is, and `2` on a usage error. At the end the script prints the exact fix commands for your machine. It never runs them.
+The exit code is `0` when nothing is vulnerable, `1` when something is, and `2` on a usage error. With `--strict`, it also returns `3` for inconclusive/broken checks or `4` for outdated/manual-review findings. Vulnerable findings still take precedence (`1`). The default exit codes remain unchanged. At the end the script prints the exact fix commands for your machine. It never runs them.
 
 ## Example
 
@@ -143,7 +145,7 @@ The script prints the fix for each finding. These come up most often:
 - `OK` means "rejects the 4 known test chains, and the trust stores checked are clean today". It is not a full security assessment of the machine.
 - The test hosts belong to the incident tracker. If they are unreachable, TLS rows report `INCONCLUSIVE`. Their certificates expire on 2027-05-03. After that date a client would reject them as expired, which looks the same as rejecting the compromised chain, so TLS tests report `INCONCLUSIVE` and only the content and version checks remain.
 - A fixed JDK keeps the roots in `cacerts` and blocks the compromised intermediates instead. The script tells the two apart with a TLS test, which needs `javac`. A JDK line whose fix has not shipped yet shows `OUTDATED` even when that test passes.
-- `--scan` prints matching lines from your files, cut to 160 characters. A `curl -k` line can carry a URL or a token, so review the output before you share it.
+- `--scan` prints file names and line numbers, never matching source lines. Output can still contain local paths and software versions; review it before sharing.
 - Not covered: Windows, browsers, mobile apps and other machines. For a Docker image or a CI runner, run the script inside it.
 - Network use: the 4 test hosts, pypi.org, and github.com (as git's control). The AWS CLI test sends unsigned requests (`--no-sign-request`), so no AWS credentials are loaded or sent. There is no telemetry.
 
@@ -160,9 +162,15 @@ This one focuses on the CLI tools and runtimes on a developer machine, and tests
 - **7.0.0** (2026-10-24): the first public release. Compared with v6 it adds the AWS CLI check (TLS test, bundled `cacert.pem` and version) and botocore's fallback bundle in venvs without certifi. TLS tests also stop reporting OK once the test certificates expire.
 - **1 to 6:** used internally as `certificate-check-vN.sh` before the public release.
 
+## Development
+
+Tests and CI are development tooling only: `python3 tests/check.py`, `shellcheck emudhra-cli-trust-check.sh`. GitHub Actions runs these on macOS and Linux. Release users still need only the script and its single SHA-256 entry.
+
 ## Credits
 
 The test hosts and the incident data come from the [eMudhra incident tracker](https://emudhra.we-have-a-problem.com/).
+Stanislav Stolberg contributed diagnostic hardening, regression tests and CI.
+
 <!-- TODO before publishing: credit the contributor who added Linux support. -->
 
 ## License
