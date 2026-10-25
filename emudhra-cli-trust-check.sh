@@ -684,7 +684,7 @@ roots_in_fps() { # roots_in_fps FILE: FILE holds one SHA-256 per line; prints cl
     END { print (out ? out : "clean") }' "$1" "$TMP/distrusted.txt"
 }
 
-# shellcheck disable=SC2329  # invoked indirectly through run_timed in bundle_check
+# shellcheck disable=SC2317,SC2329  # invoked indirectly through run_timed in bundle_check
 bundle_roots_openssl() { # bundle_roots_openssl FILE: the Python checker's answer, via the openssl CLI
   local dir="$TMP/split" c invalid=0
   rm -rf "$dir"; mkdir -p "$dir"
