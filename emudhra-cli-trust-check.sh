@@ -98,7 +98,10 @@ SCAN_DIRS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --scan)
-      [ $# -ge 2 ] && [ -d "$2" ] || { echo "--scan needs an existing directory" >&2; exit 2; }
+      if [ "$#" -lt 2 ] || [ ! -d "$2" ]; then
+        echo "--scan needs an existing directory" >&2
+        exit 2
+      fi
       SCAN_DIRS="$SCAN_DIRS$(cd "$2" && pwd -P)
 "
       shift ;;
