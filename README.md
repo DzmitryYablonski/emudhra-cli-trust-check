@@ -70,10 +70,12 @@ It takes 20 to 60 seconds, longer with `--scan` over large folders, and needs ba
 | `VERSION_OK` | Version check passed; not a live TLS test |
 | `VULNERABLE` | Accepts a compromised chain, or a trust store it uses still holds one of the roots |
 | `OUTDATED` | Older than the fixed release, or a finding to review |
-| `INCONCLUSIVE` | A test host or the control site was unreachable. Check the network and run it again |
+| `INCONCLUSIVE` | A probe could not establish a valid result. Inspect the affected rows and rerun |
 | `BROKEN` | The interpreter or venv could not run the probe |
 
 The exit code is `0` when nothing is vulnerable, `1` when something is, and `2` on a usage error. With `--strict`, it also returns `3` for inconclusive/broken checks or `4` for outdated/manual-review findings. Vulnerable findings still take precedence (`1`). The default exit codes remain unchanged. At the end the script prints the exact fix commands for your machine. It never runs them.
+
+Python certificate checks use structured verification errors: expired/not-yet-valid certificates, hostname mismatches and unknown errors remain inconclusive. Tool discovery, version queries and runtime probes have deadlines. The final `RESULT` line highlights unresolved findings even with the backward-compatible default exit code.
 
 ## Example
 
