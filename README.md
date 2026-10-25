@@ -7,6 +7,19 @@ bash emudhra-cli-trust-check.sh                 # check this machine
 bash emudhra-cli-trust-check.sh --scan ~/code   # also every virtualenv under ~/code
 ```
 
+## Scope
+
+The whole tool is one file: you download one file, check one hash, read one file and run one command. These rules keep it that way.
+
+- **One self-contained Bash file for macOS and Linux.** No modules, installers or helper files. A release ships only `emudhra-cli-trust-check.sh` and `SHA256SUMS`, and `SHA256SUMS` covers only that script.
+- **Read-only.** It never installs, updates, repairs or reconfigures anything. It prints the fix commands, and you decide whether to run them.
+- **Limited network use.** It connects only to the incident's test hosts and the control sites listed under [Limits](#limits). There is no telemetry, and no credentials are sent.
+- **Readable in one sitting.** It stays at about 1,000 lines of Bash, so a new check has to be worth the lines it adds.
+- **Windows is not on `main`** until it can be tested on Windows.
+- **Everything else is for development.** If the repository gains tests or CI, they are there for maintainers. You don't need to read or run them to use the tool.
+
+Contributions are welcome when they follow these rules. Please send focused pull requests, one topic each.
+
 ## Background
 
 - On 2026-10-20 it was disclosed that the private keys of 8 eMudhra intermediate CAs can be recovered from the certificates themselves ([incident tracker](https://emudhra.we-have-a-problem.com/)). Anyone can now issue a certificate for any hostname that chains to **emSign ECC Root CA - G3**, or through a cross-sign to **AAA Certificate Services**.
