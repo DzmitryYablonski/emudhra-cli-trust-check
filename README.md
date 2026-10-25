@@ -34,6 +34,7 @@ Contributions are welcome when they follow these rules. Please send focused pull
 | curl, git | Real TLS connections to the incident's 4 test hosts |
 | Every Python it finds (PATH, Homebrew, python.org, pyenv, conda, uv-managed) | stdlib and `requests` TLS tests; pip's vendored certifi, certifi, and botocore's own bundle checked by SHA-256 |
 | Every Node.js it finds | TLS test and version |
+| Every Bun it finds (PATH, `~/.bun/bin`, Homebrew) | TLS test and version |
 | AWS CLI (v1 and v2) | TLS test with unsigned requests; for v2, also the content of its bundled `cacert.pem` and the version |
 | System CA bundles | Content, by SHA-256 of each root |
 | Every Java it finds | `cacerts` content; a TLS test when `javac` is present; version |
@@ -117,6 +118,7 @@ The AWS CLI there is fixed, but curl and Python read the system bundle, which st
 | pip | 26.2.2 |
 | uv | 0.13.5 |
 | Node.js | 22.23.4, 24.22.1, 26.12.1 |
+| Bun | 1.4.4 |
 | AWS CLI v2 | 2.38.4 ([aws/aws-cli@011f84b](https://github.com/aws/aws-cli/commit/011f84bfaf)) |
 | botocore | 1.43.117 ([boto/botocore@0a6c7b6](https://github.com/boto/botocore/commit/0a6c7b6b3e)) |
 | Java | 8u511, 11.0.33, 17.0.21, 21.0.13, 25.0.5, 27.0.1 |
@@ -134,6 +136,7 @@ The script prints the fix for each finding. These come up most often:
 
 - **Python project venvs:** `uv lock --upgrade-package certifi && uv sync`, or `pip install -U "certifi>=2026.10.23"`.
 - **Node.js:** upgrade to 22.23.4, 24.22.1 or 26.12.1 or later. Old installs left outside PATH still run from cron, launchd or systemd, so remove them.
+- **Bun:** `bun upgrade` to 1.4.4 or later. Bun carries its own root store, so updating `ca-certificates` or passing `--use-system-ca` does not remove the roots.
 - **AWS CLI v2 before 2.38.4:** update it. Until then, `export AWS_CA_BUNDLE=/etc/ssl/cert.pem` on macOS or point it at your distro bundle, provided the script reports that bundle as `OK`.
 - **System CA bundle:** update `ca-certificates`. If the distro has not shipped the removal yet, blocklist the roots (`/etc/ca-certificates.conf` on Debian and Ubuntu, `/etc/pki/ca-trust/source/blocklist/` on RHEL and Amazon Linux).
 - **Java 8 older than 8u511:** update it, or remove it if nothing needs it.
