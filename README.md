@@ -36,8 +36,9 @@ Contributions are welcome when they follow these rules. Please send focused pull
 | Every Node.js it finds | TLS test and version |
 | AWS CLI (v1 and v2) | TLS test with unsigned requests; for v2, also the content of its bundled `cacert.pem` and the version |
 | System CA bundles | Content, by SHA-256 of each root |
-| Every Java it finds | `cacerts` content; a TLS test when `javac` is present; version |
-| uv, Go, VS Code, Docker Desktop, Obsidian, Claude Code | Version compared with the fixed release |
+| Every Java it finds | `cacerts` content, including emSign Root CA - G1 and G2, which OpenJDK also says to remove; a TLS test when `javac` is present; the October 2026 release as a minimum version |
+| Perl `Mozilla::CA` | Content of its CA bundle |
+| uv, Go, Bun, Deno, GitHub CLI, Docker CLI, conda, rustup, VS Code, Docker Desktop, Obsidian, Claude Code | Version compared with the fixed release |
 | `--scan DIR` | Every virtualenv under DIR, plus code and config that turn TLS verification off (`verify=False`, `curl -k`, `NODE_TLS_REJECT_UNAUTHORIZED=0`, `strict-ssl false` and similar) |
 
 Trust stores are judged by content, not by version number. A distro-patched certifi that reads the system bundle (Debian, Ubuntu, Fedora) is not flagged just because its version is old.
@@ -80,8 +81,8 @@ The exit code is `0` when nothing is vulnerable, `1` when something is, and `2` 
 The `amazon/aws-cli:latest` container on 2026-10-25, trimmed:
 
 ```text
-== eMudhra CA compromise: Linux check (read-only), emudhra-cli-trust-check 7.1.0 ==
-  Amazon Linux 2023.12.20261021 | 2026-10-25 11:12 | fixed versions as of 2026-10-24
+== eMudhra CA compromise: Linux check (read-only), emudhra-cli-trust-check 7.2.0 ==
+  Amazon Linux 2023.12.20261021 | 2026-10-25 19:14 | fixed versions as of 2026-10-25
   tracker: https://emudhra.we-have-a-problem.com
   OK (TLS) = rejects all 4 test chains and still reaches https://pypi.org/
   VERSION_OK = version check only; bundle/content checks are labelled separately
@@ -113,7 +114,7 @@ The `amazon/aws-cli:latest` container on 2026-10-25, trimmed:
 
 The AWS CLI there is fixed, but curl and Python read the system bundle, which still holds the emSign root.
 
-## Fixed versions (as of 2026-10-24)
+## Fixed versions (as of 2026-10-25)
 
 | Component | Fixed in |
 | --- | --- |
@@ -123,7 +124,14 @@ The AWS CLI there is fixed, but curl and Python read the system bundle, which st
 | Node.js | 22.23.4, 24.22.1, 26.12.1 |
 | AWS CLI v2 | 2.38.4 ([aws/aws-cli@011f84b](https://github.com/aws/aws-cli/commit/011f84bfaf)) |
 | botocore | 1.43.117 ([boto/botocore@0a6c7b6](https://github.com/boto/botocore/commit/0a6c7b6b3e)) |
-| Java | 8u511, 11.0.33, 17.0.21, 21.0.13, 25.0.5, 27.0.1 |
+| Java | No fixed release yet: the fix will list JDK-8395690 ([CVE-2026-114820](https://nvd.nist.gov/vuln/detail/CVE-2026-114820)) in its release notes. Until then, remove the roots as described in the [OpenJDK guidance](https://openjdk.org/emudhra). Releases older than October 2026 (8u511, 11.0.33, 17.0.21, 21.0.13, 25.0.5, 27.0.1) also lack the [CVE-2026-91403](https://nvd.nist.gov/vuln/detail/CVE-2026-91403) fix |
+| Perl Mozilla::CA | 20261020 |
+| Bun | 1.4.4 |
+| Deno | 2.9.8 |
+| GitHub CLI | 2.102.1 |
+| Docker CLI | 29.9.2 |
+| conda | 26.9.4 |
+| rustup | 1.29.2 |
 | Go | 1.26.10, 1.27.3 |
 | VS Code | 1.143.1 |
 | Docker Desktop | 4.96.2 |
@@ -140,16 +148,27 @@ The script prints the fix for each finding. These come up most often:
 - **Node.js:** upgrade to 22.23.4, 24.22.1 or 26.12.1 or later. Old installs left outside PATH still run from cron, launchd or systemd, so remove them.
 - **AWS CLI v2 before 2.38.4:** update it. Until then, `export AWS_CA_BUNDLE=/etc/ssl/cert.pem` on macOS or point it at your distro bundle, provided the script reports that bundle as `OK`.
 - **System CA bundle:** update `ca-certificates`. If the distro has not shipped the removal yet, blocklist the roots (`/etc/ca-certificates.conf` on Debian and Ubuntu, `/etc/pki/ca-trust/source/blocklist/` on RHEL and Amazon Linux).
-- **Java 8 older than 8u511:** update it, or remove it if nothing needs it.
+- **Java:** no release fixes JDK-8395690 yet. Remove the four aliases `emsignrootcag1`, `emsignrootcag2`, `emsigneccrootcag3` and `comodoaaaca` from `cacerts` as the [OpenJDK guidance](https://openjdk.org/emudhra) shows, or remove the Java if nothing needs it. Update to a release from October 2026 or later, and again when a vendor ships JDK-8395690.
 
 ## Limits
 
 - `OK` means "rejects the 4 known test chains, and the trust stores checked are clean today". It is not a full security assessment of the machine.
 - The test hosts belong to the incident tracker. If they are unreachable, TLS rows report `INCONCLUSIVE`. Their certificates expire on 2027-05-03. After that date a client would reject them as expired, which looks the same as rejecting the compromised chain, so TLS tests report `INCONCLUSIVE` and only the content and version checks remain.
-- A fixed JDK keeps the roots in `cacerts` and blocks the compromised intermediates instead. The script tells the two apart with a TLS test, which needs `javac`. A JDK line whose fix has not shipped yet shows `OUTDATED` even when that test passes.
+- Until a JDK ships JDK-8395690, every Java whose `cacerts` still holds one of the roots shows `OUTDATED`, even when its TLS test passes. The test chains cover only the 8 known intermediates, and the October 2026 builds block those while keeping the roots.
 - `--scan` prints file names and line numbers, never matching source lines. Output can still contain local paths and software versions; review it before sharing.
 - Not covered: Windows, browsers, mobile apps and other machines. For a Docker image or a CI runner, run the script inside it.
+- Code-signing trust (Windows Authenticode, `jarsigner`) is not checked. Programs that embed their own root list, such as Rust binaries built with webpki-roots before 1.0.10 or Electron apps before 44.9.1, 43.8.1 or 42.11.16, are covered only for the tools listed above.
 - Network use: the 4 test hosts, pypi.org, and github.com (as git's control). The AWS CLI test sends unsigned requests (`--no-sign-request`), so no AWS credentials are loaded or sent. There is no telemetry.
+
+## Related advisories
+
+These IDs help you match scanner findings to this incident:
+
+- [GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2): certifi. The advisory names 2026.10.19 as fixed; this script requires 2026.10.23, which also follows Mozilla's later removals.
+- [CVE-2026-91403](https://nvd.nist.gov/vuln/detail/CVE-2026-91403): Oracle Java SE and GraalVM.
+- [CVE-2026-114820](https://nvd.nist.gov/vuln/detail/CVE-2026-114820) / JDK-8395690: Java SE, OpenJDK ([guidance](https://openjdk.org/emudhra)). It also covers builds released after CVE-2026-91403.
+- [CVE-2026-114406](https://nvd.nist.gov/vuln/detail/CVE-2026-114406): the Red Hat `ca-certificates` package.
+- [CVE-2026-113812](https://nvd.nist.gov/vuln/detail/CVE-2026-113812): Perl Mozilla::CA.
 
 ## Other tools
 
@@ -161,6 +180,7 @@ This one focuses on the CLI tools and runtimes on a developer machine, and tests
 
 ## Version history
 
+- **7.2.0** (2026-10-25): Java is judged by its `cacerts` content. No release fixes JDK-8395690 (CVE-2026-114820) yet, so any of the roots OpenJDK says to remove is `OUTDATED`, including emSign Root CA - G1 and G2, even when the TLS test passes. Releases older than October 2026 are `OUTDATED` too. New checks cover Perl Mozilla::CA and the versions of Bun, Deno, GitHub CLI, Docker CLI, conda and rustup. The README gained a list of related advisories.
 - **7.1.0** (2026-10-25): diagnostic hardening. Incomplete probes, malformed bundles and failed Java checks no longer pass. Probes have time limits and no longer pick up your git credentials, `.netrc` or `.curlrc`, and `~/.curlrc` is checked on its own for `insecure` and `cacert`. `--scan` prints only file names and line numbers. Environment variables that turn TLS verification off are reported. `VERSION_OK` marks version-only checks, and `--strict` adds exit codes 3 and 4. Regression tests and CI were added.
 - **7.0.0** (2026-10-24): the first public release. Compared with v6 it adds the AWS CLI check (TLS test, bundled `cacert.pem` and version) and botocore's fallback bundle in venvs without certifi. TLS tests also stop reporting OK once the test certificates expire.
 - **1 to 6:** used internally as `certificate-check-vN.sh` before the public release.

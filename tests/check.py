@@ -228,6 +228,36 @@ class Java(unittest.TestCase):
             p = bash('java_store_roots(){ echo clean; }\n' + function('run_timed') + '\n' + code, d)
             self.assertEqual(p.stdout.strip(), 'INCONCLUSIVE', p.stderr)
 
+    def test_java_verdict_follows_cacerts_content(self):
+        # No release ships JDK-8395690 yet: the version is a lower bound, the cacerts content decides.
+        start = SOURCE.index('    jv=$("$jh/bin/java"')
+        end = SOURCE.index('  done 3< "$TMP/jvms"', start)
+        for version, roots, expected in [('1.8.0_512', 'clean', 'OK'), ('1.8.0_511', 'clean', 'OK'),
+                                         ('1.8.0_501', 'clean', 'OUTDATED'), ('17.0.21.0.10', 'clean', 'OK'),
+                                         ('17.0.20', 'clean', 'OUTDATED'), ('28.0.1', 'clean', 'OK'),
+                                         ('11.0.20', 'clean', 'OUTDATED'), ('16.0.2', 'clean', 'OUTDATED'),
+                                         ('1.8.0_512', 'AAA+emSign-G1', 'OUTDATED'),
+                                         ('21.0.13.0.10', 'emSign-G2', 'OUTDATED')]:
+            with self.subTest(version=version, roots=roots), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                (root / 'bin').mkdir()
+                (root / 'lib/security').mkdir(parents=True)
+                (root / 'lib/security/cacerts').touch()
+                java = root / 'bin/java'
+                java.write_text(f'#!/bin/sh\necho \'openjdk version "{version}"\'\n')
+                keytool = root / 'bin/keytool'
+                keytool.write_text('#!/bin/sh\nexit 0\n')
+                java.chmod(0o700); keytool.chmod(0o700)
+                code = ('TMP=$1; jh=$1; OS=Linux; ROOTS_STUB=$2\nrow(){ echo "$1"; }\naction(){ :; }\nshort(){ echo "$1"; }\n'
+                        'java_store_roots(){ echo "$ROOTS_STUB"; }\n' + function('rank') + '\n' + function('worse') + '\n' +
+                        function('ver_ge') + '\n' + SOURCE[start:end])
+                p = bash(code, d, roots)
+                self.assertEqual(p.stdout.strip(), expected, p.stderr)
+
+    def test_java_list_adds_openjdk_roots_only_for_java(self):
+        self.assertIn('emSign-G1', SOURCE[SOURCE.index('JAVA_EXTRA_ROOTS='):SOURCE.index('JAVA_EXTRA_ROOTS=') + 300])
+        self.assertNotIn('40F6AF0346A99AA1CD1D555A4E9CCE62C7F9634603EE406615833DC8C8D00367', ROOTS)
+
 
 class Bundles(unittest.TestCase):
     def check_bundles(self, contents):
@@ -339,6 +369,31 @@ class Curlrc(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as c:
             (Path(c) / '.curlrc').write_text('silent\n')
             self.assertEqual(self.check(Path(d), 'insecure\n', curl_home=c), 'OK|no certificate overrides')
+
+
+class Tools(unittest.TestCase):
+    def run_tool(self, name, output, *args):
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / name
+            fake.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_OUTPUT"\n')
+            fake.chmod(0o700)
+            code = ('export PATH="$1:$PATH" FAKE_OUTPUT=$2; shift 2\n'
+                    'has(){ command -v "$1" >/dev/null 2>&1; }\nrow(){ echo "$1 $2"; }\naction(){ :; }\n' +
+                    function('run_timed') + '\n' + function('ver_ge') + '\n' + function('tool_check') + '\ntool_check "$@"')
+            p = bash(code, d, output, *args)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            return p.stdout.strip()
+
+    def test_versions_are_compared_with_the_fix(self):
+        self.assertEqual(self.run_tool('gh', 'gh version 2.101.0 (2026-10-01)', 'GitHub CLI', '2.102.1', 'gh version ', 'gh', '--version'),
+                         'OUTDATED GitHub CLI 2.101.0')
+        self.assertEqual(self.run_tool('gh', 'gh version 2.102.1 (2026-10-22)', 'GitHub CLI', '2.102.1', 'gh version ', 'gh', '--version'),
+                         'VERSION_OK GitHub CLI 2.102.1')
+        self.assertEqual(self.run_tool('bun', '1.4.3', 'Bun', '1.4.4', '^', 'bun', '--version'), 'OUTDATED Bun 1.4.3')
+
+    def test_unrecognised_output_is_skipped(self):
+        # A podman alias answering as "docker" must not be compared with Docker's version floor.
+        self.assertEqual(self.run_tool('docker', 'podman version 4.9.3', 'Docker CLI', '29.9.2', 'Docker version ', 'docker', '--version'), '')
 
 
 if __name__ == '__main__':

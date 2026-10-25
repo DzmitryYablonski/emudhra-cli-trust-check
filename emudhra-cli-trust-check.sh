@@ -9,9 +9,9 @@ umask 077
 export HOMEBREW_NO_AUTO_UPDATE=1
 
 # Versions 1 to 6 were used internally (certificate-check-vN.sh); 7.0.0 is the first public release.
-VERSION="7.1.0"
+VERSION="7.2.0"
 # The fixed versions below were checked on this date; newer releases may have shipped since.
-AS_OF="2026-10-24"
+AS_OF="2026-10-25"
 TRACKER="https://emudhra.we-have-a-problem.com"
 TEST_URLS=(
   "https://dv-g3b-emudhra.we-have-a-problem.com/"
@@ -40,6 +40,9 @@ FIXED_VSCODE="1.143.1"
 FIXED_DOCKER="4.96.2"
 FIXED_OBSIDIAN="1.14.5"
 FIXED_CLAUDE="2.1.303"
+FIXED_MOZILLA_CA="20261020"  # Perl, CVE-2026-113812
+# Version-only checks for tools that ship their own root store or TLS stack (tracker list).
+FIXED_BUN="1.4.4"; FIXED_DENO="2.9.8"; FIXED_GH="2.102.1"; FIXED_DOCKER_CLI="29.9.2"; FIXED_CONDA="26.9.4"; FIXED_RUSTUP="1.29.2"
 
 # The roots the compromised intermediates chain to, one "SHA-256 of the DER certificate:name" per
 # line: the single list behind every content check (Python probe, system bundles, Java cacerts,
@@ -49,6 +52,10 @@ DISTRUSTED_ROOTS="D7A7A0FB5D7E2731D771E9484EBCDEF71D5F0C3E0A2948782BC83EE0EA699E
 7DD78D5F4F13459A83DFF9ABBBA62EDBAF6F2D102BF257FD712F4D9F2746ED8D:emSign-TLS-G3
 F2EDAAFF3D9B701FB4D14C9F285F8C0BAD90FC3BCC1FA07D47F4718EDABA34A5:emSign-CS-G3"
 export DISTRUSTED_ROOTS
+# OpenJDK (https://openjdk.org/emudhra) also removes emSign Root CA - G1 and G2 from cacerts. Mozilla's
+# store and certifi keep trusting them, so only the Java check uses these two.
+JAVA_EXTRA_ROOTS="40F6AF0346A99AA1CD1D555A4E9CCE62C7F9634603EE406615833DC8C8D00367:emSign-G1
+1AA0C2709E831BD6E3B5129A00BA41F7EEEF020872F1E6504BF0F6C3F24F3AF3:emSign-G2"
 
 usage() {
   cat <<'EOF'
@@ -65,14 +72,16 @@ Usage:
 
 What it checks:
   curl, git, every Python interpreter (stdlib TLS, pip, certifi, requests), every Node.js and
-  the AWS CLI are tested against the incident's 4 test chains. uv, AWS CLI v2, Java, Go,
-  VS Code, Docker Desktop, Obsidian and Claude Code are compared with their fixed releases.
+  the AWS CLI are tested against the incident's 4 test chains. uv, AWS CLI v2, Go, Bun, Deno,
+  GitHub CLI, Docker CLI, conda, rustup, VS Code, Docker Desktop, Obsidian and Claude Code
+  are compared with their fixed releases. Perl's Mozilla::CA bundle is checked by content.
   ~/.curlrc is checked separately for insecure (-k) and cacert/capath, since the probes skip it.
   Trust stores are judged by content: the system CA bundles, certifi, pip's vendored certifi,
   botocore's own bundle (used when certifi is absent), the AWS CLI's bundle and every Java
   cacerts are searched for the 4 distrusted roots by SHA-256, so a distro-patched certifi that
   reads the system bundle (Debian, Ubuntu, Fedora) is not flagged for its old version number.
-  A Java that ships javac also gets a real TLS test.
+  Java: no release fixes JDK-8395690 yet, so cacerts decides. Any of the roots OpenJDK says to
+  remove (the 4 above plus emSign Root CA - G1 and G2) is OUTDATED; with javac, a TLS test too.
   On Linux the app bundle checks are replaced by `code --version`; Docker Desktop and
   Obsidian are not checked.
 
@@ -120,6 +129,7 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/emudhra.XXXXXX") || exit 1
 trap 'rm -rf "$TMP"' EXIT
 : > "$TMP/actions"
 printf '%s\n' "$DISTRUSTED_ROOTS" > "$TMP/distrusted.txt"
+printf '%s\n' "$DISTRUSTED_ROOTS" "$JAVA_EXTRA_ROOTS" > "$TMP/java-distrusted.txt"
 
 if [ -t 1 ]; then RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; BLD=$'\033[1m'; RST=$'\033[0m'
 else RED=""; GRN=""; YEL=""; BLD=""; RST=""; fi
@@ -667,10 +677,10 @@ ca_fix_hint() { # ca_fix_hint ROOTS: how to stop the system store trusting ROOTS
   esac
 }
 
-roots_in_fps() { # roots_in_fps FILE: FILE holds one SHA-256 per line; prints clean, empty or ROOT+ROOT
+roots_in_fps() { # roots_in_fps FILE [LIST]: FILE holds one SHA-256 per line; prints clean, empty or ROOT+ROOT
   [ -s "$1" ] || { echo empty; return; }
   awk -F: 'NR == FNR { have[toupper($0)] = 1; next } ($1 in have) { out = out (out ? "+" : "") $2 }
-    END { print (out ? out : "clean") }' "$1" "$TMP/distrusted.txt"
+    END { print (out ? out : "clean") }' "$1" "${2:-$TMP/distrusted.txt}"
 }
 
 bundle_roots_openssl() { # bundle_roots_openssl FILE: the Python checker's answer, via the openssl CLI
@@ -696,7 +706,7 @@ java_store_roots() { # java_store_roots STORE KEYTOOL: clean, empty or ROOT+ROOT
     | awk '/^[[:space:]]*SHA256:/ { sub(/.*SHA256:[[:space:]]*/, ""); gsub(/:/, ""); print }' > "$TMP/java.fps"; then
     echo empty; return
   fi
-  roots_in_fps "$TMP/java.fps"
+  roots_in_fps "$TMP/java.fps" "$TMP/java-distrusted.txt"
 }
 
 cat > "$TMP/T.java" <<'JAVA'
@@ -971,15 +981,22 @@ if [ -s "$TMP/jvms" ]; then
   while IFS= read -r jh <&3; do
     [ -x "$jh/bin/java" ] || continue
     jv=$("$jh/bin/java" -version 2>&1 </dev/null | awk -F'"' '/version/ {print $2; exit}')
+    # Version is only a lower bound, the October 2026 release of each line. No vendor has shipped
+    # JDK-8395690 (CVE-2026-114820) yet, so the cacerts content decides, not the version.
     case "$jv" in
-      1.8.0_*) cmp="8.0.${jv#1.8.0_}"; fixed="8.0.511"; shown="8u511" ;;
+      1.8.0_*) cmp="8.0.${jv#1.8.0_}"; floor="8.0.511"; shown="8u511" ;;
       *) cmp="$jv"
-         case "${jv%%.*}" in 11) fixed=11.0.33 ;; 17) fixed=17.0.21 ;; 21) fixed=21.0.13 ;; 25) fixed=25.0.5 ;; 27) fixed=27.0.1 ;; *) fixed="" ;; esac
-         # Lines newer than 27 postdate the fix: compare them with 27.0.1 so they pass.
-         if [ -z "$fixed" ] && ver_ge "$jv" 28; then fixed=27.0.1; fi
-         shown="$fixed" ;;
+         case "${jv%%.*}" in 11) floor=11.0.33 ;; 17) floor=17.0.21 ;; 21) floor=21.0.13 ;; 25) floor=25.0.5 ;; 27) floor=27.0.1 ;; *) floor="" ;; esac
+         # Lines newer than 27 postdate the incident: compare them with 27.0.1 so they pass.
+         if [ -z "$floor" ] && ver_ge "$jv" 28; then floor=27.0.1; fi
+         shown="$floor" ;;
     esac
-    v=OK; det=""; roots=""; tls=""; relok=0
+    case "$OS:$jv" in
+      Darwin:1.8.0_*) jhint=" (e.g. brew install --cask corretto@8)" ;;
+      Darwin:*) jhint="" ;;
+      *) jhint=" (distro openjdk package or the vendor build)" ;;
+    esac
+    v=OK; det=""; roots=""; tls=""
     # Trust store content. JSSE reads jssecacerts instead of cacerts when it exists.
     kt=""; for k in "$jh/bin/keytool" "$jh/jre/bin/keytool"; do [ -x "$k" ] && { kt=$k; break; }; done
     store=""; for s in "$jh/lib/security/jssecacerts" "$jh/jre/lib/security/jssecacerts" \
@@ -1008,36 +1025,18 @@ if [ -s "$TMP/jvms" ]; then
         v=$(worse "$v" INCONCLUSIVE); det="$det | TLS test did not run"
       fi
     fi
-    # Release check: older than the fixed update is OUTDATED even with a clean store.
-    if [ -z "$fixed" ]; then
-      v=$(worse "$v" OUTDATED); det="$det | no fixed release listed for this line; move to 21/25/27"
-    elif ver_ge "$cmp" "$fixed"; then
-      relok=1; det="$det | fixed from $shown"
-    else
-      v=$(worse "$v" OUTDATED); det="$det | fixed in $shown"
+    if [ -z "$floor" ]; then
+      v=$(worse "$v" OUTDATED); det="$det | no supported release line; move to 21/25/27"
+    elif ! ver_ge "$cmp" "$floor"; then
+      v=$(worse "$v" OUTDATED); det="$det | older than the October 2026 release ($shown)"
+      action "Java $jv ($(short "$jh")): update to $shown or later$jhint, or remove it if unused"
     fi
-    # Fixed JDKs keep the roots and block the compromised intermediates instead, so the roots alone
-    # are not the verdict: a rejecting TLS test or a fixed release clears them.
+    # The test chains cover only the 8 intermediates, so a rejecting TLS test does not clear the roots.
     if [ -n "$roots" ]; then
-      if [ "$tls" = OK ]; then
-        det="$det | the roots stay, but this build rejects the test chains"
-      elif [ "$relok" = 1 ] && [ "$tls" != VULNERABLE ]; then
-        det="$det | the roots stay; a fixed release blocks the compromised intermediates"
-      else
-        v=$(worse "$v" VULNERABLE)
-        action "Java $jv ($(short "$jh")): update it, or remove $roots from $(short "$store") with keytool -delete -keystore <store> -storepass changeit -alias <alias> (find the alias by its SHA-256 in keytool -list -v)"
-      fi
+      v=$(worse "$v" OUTDATED); det="$det | OpenJDK advises removing them until a release lists JDK-8395690"
+      action "Java $jv ($(short "$jh")): remove $roots from $(short "$store"): keytool -delete -keystore <store> -storepass changeit -alias <alias> (aliases in keytool -list -v; see https://openjdk.org/emudhra)"
     fi
-    if [ "$v" = OK ] && [ "$tls" != OK ]; then v=VERSION_OK; fi
     row "$v" "Java $jv  $(short "$jh")" "$det"
-    if [ "$v" != OK ] && [ "$v" != VERSION_OK ]; then
-      case "$OS:$jv" in
-        Darwin:1.8.0_*) jhint=" (e.g. brew install --cask corretto@8)" ;;
-        Darwin:*) jhint="" ;;
-        *) jhint=" (distro openjdk package or the vendor build)" ;;
-      esac
-      action "Java $jv ($(short "$jh")): update to ${shown:-a fixed LTS release} or later$jhint, or remove it if unused"
-    fi
   done 3< "$TMP/jvms"
 else
   echo "  no Java runtime installed"
@@ -1058,6 +1057,38 @@ if has go; then
 else
   echo "  Go not found"
 fi
+
+section "Perl Mozilla::CA (fallback CA bundle)"
+pca=""
+# shellcheck disable=SC2016  # Perl code: perl expands it, not the shell
+has perl && pca=$(run_timed 10 perl -MMozilla::CA -e 'print "$Mozilla::CA::VERSION\t", Mozilla::CA::SSL_ca_file()' 2>/dev/null </dev/null)
+if [ -z "$pca" ]; then echo "  Mozilla::CA not installed for the default perl"
+else
+  IFS=$'\t' read -r pcv pcf <<< "$pca"
+  case "$(bundle_check "$pcf")" in
+    clean) row OK "Mozilla::CA $pcv" "bundle clean" ;;
+    ""|empty) row INCONCLUSIVE "Mozilla::CA $pcv" "$(short "$pcf") could not be inspected" ;;
+    *) row OUTDATED "Mozilla::CA $pcv" "bundle trusts the distrusted roots; IO::Socket::SSL tries the system store first, so it is a fallback (fixed in $FIXED_MOZILLA_CA)"
+       action "Update Perl Mozilla::CA $pcv to $FIXED_MOZILLA_CA or later (cpanm Mozilla::CA, or the distro package)" ;;
+  esac
+fi
+
+tool_check() { # tool_check NAME FIXED PREFIX CMD...: version-only check; skipped when CMD is absent or unrecognised
+  local name=$1 fixed=$2 prefix=$3 v; shift 3
+  has "$1" || return 0
+  v=$(run_timed 10 "$@" 2>/dev/null </dev/null | grep -oE "${prefix}[0-9]+(\.[0-9]+)+" | head -1 | grep -oE '[0-9]+(\.[0-9]+)+$')
+  [ -n "$v" ] || return 0
+  if ver_ge "$v" "$fixed"; then row VERSION_OK "$name $v" "fixed from $fixed"
+  else row OUTDATED "$name $v" "fixed in $fixed"; action "Update $name to $fixed or later"; fi
+}
+
+section "Other tools (version check only)"
+tool_check Bun "$FIXED_BUN" "^" bun --version
+tool_check Deno "$FIXED_DENO" "^deno " deno --version
+tool_check "GitHub CLI" "$FIXED_GH" "gh version " gh --version
+tool_check "Docker CLI" "$FIXED_DOCKER_CLI" "Docker version " docker --version
+tool_check conda "$FIXED_CONDA" "^conda " conda --version
+tool_check rustup "$FIXED_RUSTUP" "^rustup " rustup --version
 
 section "Apps"
 app_check() { # app_check NAME FIXED BUNDLE_NAME
