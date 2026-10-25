@@ -4,16 +4,24 @@
 # Run `bash emudhra-cli-trust-check.sh --help` for usage. Reference: https://emudhra.we-have-a-problem.com
 # https://github.com/DzmitryYablonski/emudhra-cli-trust-check (MIT License)
 set -u
+set -o pipefail
+umask 077
+export HOMEBREW_NO_AUTO_UPDATE=1
 
 # Versions 1 to 6 were used internally (certificate-check-vN.sh); 7.0.0 is the first public release.
 VERSION="7.0.0"
 # The fixed versions below were checked on this date; newer releases may have shipped since.
 AS_OF="2026-10-24"
 TRACKER="https://emudhra.we-have-a-problem.com"
-TEST_URLS="https://dv-g3b-emudhra.we-have-a-problem.com/ https://dv-g3b-aaa-emudhra.we-have-a-problem.com/ https://dv-g3b-noct-emudhra.we-have-a-problem.com/ https://dv-g3b-aaa-noct-emudhra.we-have-a-problem.com/"
+TEST_URLS=(
+  "https://dv-g3b-emudhra.we-have-a-problem.com/"
+  "https://dv-g3b-aaa-emudhra.we-have-a-problem.com/"
+  "https://dv-g3b-noct-emudhra.we-have-a-problem.com/"
+  "https://dv-g3b-aaa-noct-emudhra.we-have-a-problem.com/"
+)
 # A small page: /simple/ is ~47 MB, which every full GET (requests, curl) would download.
 CONTROL_URL="https://pypi.org/"
-NH=$(echo "$TEST_URLS" | wc -w | tr -d ' ')
+NH=${#TEST_URLS[@]}
 # The test hosts' own certificates expire on 2027-05-03..05 (UTC). After that every client rejects them
 # as expired, which would read as "rejects the compromised chains", so TLS tests stop reporting OK.
 TEST_CERTS_NOT_AFTER=20270503
@@ -78,7 +86,10 @@ pypi.org and github.com as controls. The AWS CLI test sends unsigned requests
 (--no-sign-request), so no AWS credentials are loaded or sent.
 Limits: OK means "rejects the 4 known test chains today", not "this machine is safe". The test
 hosts' certificates expire on 2027-05-03; after that TLS tests report INCONCLUSIVE.
-Exit code: 0 nothing vulnerable, 1 something vulnerable, 2 usage error.
+Exit code: 0 all performed checks passed, 1 vulnerable, 2 usage error,
+           3 inconclusive/broken checks, 4 outdated or manual review required.
+VERSION_OK means version check only, not a live TLS test.
+--scan prints file names and line numbers, never matching source lines.
 Reference: https://emudhra.we-have-a-problem.com
 EOF
 }
@@ -129,9 +140,12 @@ row() { # row VERDICT LABEL [DETAILS]
 rank() { case "$1" in VULNERABLE) echo 4 ;; BROKEN|INCONCLUSIVE) echo 3 ;; OUTDATED) echo 2 ;; OK) echo 1 ;; *) echo 0 ;; esac; }
 worse() { if [ "$(rank "$1")" -ge "$(rank "$2")" ]; then echo "$1"; else echo "$2"; fi; }
 
-ver_ge() { # ver_ge A B: true when version A >= B. Compares numeric fields, ignores a leading "v"/"go".
+ver_ge() { # Compare stable numeric releases; unknown/prerelease versions never establish a fix.
   local a=$1 b=$2
-  a=${a#"${a%%[0-9]*}"}; b=${b#"${b%%[0-9]*}"}
+  a=${a#go}; a=${a#v}; b=${b#go}; b=${b#v}
+  [[ "$a" =~ ^[0-9]+(\.[0-9]+)*(\+[0-9A-Za-z.-]+)?(-LTS)?$ ]] || return 1
+  [[ "$b" =~ ^[0-9]+(\.[0-9]+)*$ ]] || return 1
+  a=${a%%+*}; a=${a%-LTS}
   awk -v a="$a" -v b="$b" 'BEGIN {
     n = split(a, x, /[^0-9]+/); m = split(b, y, /[^0-9]+/); k = (n > m) ? n : m
     for (i = 1; i <= k; i++) {
@@ -155,6 +169,15 @@ resolve() { # resolve PATH: follow symlinks, print the physical path
 }
 
 verdict() { # verdict REJECTED CONNECTED ERRORS CONTROL_OK
+  local value
+  [ "$#" -eq 4 ] || { echo INCONCLUSIVE; return; }
+  for value in "$@"; do
+    case "$value" in ""|*[!0-9]*) echo INCONCLUSIVE; return ;; esac
+    [ "${#value}" -le 2 ] || { echo INCONCLUSIVE; return; }
+  done
+  if [ "$((10#$1 + 10#$2 + 10#$3))" -ne "$NH" ] || [ "$4" -gt 1 ]; then
+    echo INCONCLUSIVE; return
+  fi
   if [ "$2" -gt 0 ]; then echo VULNERABLE
   elif [ "$1" -eq "$NH" ] && [ "$4" -eq 1 ] && [ "$TLS_EXPIRED" = 0 ]; then echo OK
   else echo INCONCLUSIVE; fi
@@ -172,6 +195,44 @@ BREW_PREFIX="/nonexistent"
 has brew && BREW_PREFIX=$(brew --prefix 2>/dev/null)
 
 # ---------------------------------------------------------------- probes
+
+run_timed() {
+  (
+    seconds="$1"; job=""; timer=""; rc=0
+    shift
+    # Separate job groups let the deadline stop helpers and inherited output pipes too.
+    set -m
+    "$@" & job=$!
+    ( sleep "$seconds"; kill -TERM -- -"$job" 2>/dev/null; sleep 2; kill -KILL -- -"$job" 2>/dev/null ) </dev/null >/dev/null 2>&1 & timer=$!
+    trap 'kill -KILL -- -"$job" -"$timer" 2>/dev/null; wait "$timer" 2>/dev/null' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    wait "$job" 2>/dev/null; rc=$?
+    exit "$rc"
+  )
+}
+
+git_tls() { # Keep TLS/proxy choices, exclude credentials, cookies, hooks and URL rewrites.
+  local url="$1" key value
+  # Empty Authorization suppresses automatic HTTP auth even on curl versions predating NETRC.
+  local args=(-c credential.helper= -c credential.interactive=false -c core.askPass=
+    -c http.extraHeader=Authorization: -c http.followRedirects=false -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10)
+  git config --list >/dev/null 2>&1 || return 2
+  for key in http.sslVerify http.sslCAInfo http.sslCAPath http.sslBackend http.sslVersion \
+             http.schannelUseSSLCAInfo http.schannelCheckRevoke http.proxy http.proxySSLCAInfo \
+             http.proxySSLCAPath http.proxySSLVerify; do
+    case "$key" in
+      *CAInfo|*CAPath) value=$(git config --path --get-urlmatch "$key" "$url" 2>/dev/null) || continue ;;
+      *) value=$(git config --get-urlmatch "$key" "$url" 2>/dev/null) || continue ;;
+    esac
+    args+=(-c "$key=$value")
+  done
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_COUNT=0 GIT_CONFIG_PARAMETERS='' \
+    NETRC=/dev/null LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false run_timed 25 \
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_CONFIG \
+      -u GIT_SSL_CERT -u GIT_SSL_KEY -u GIT_SSL_CERT_PASSWORD_PROTECTED \
+      git -C "$TMP" "${args[@]}" ls-remote "$@"
+}
 
 cat > "$TMP/probe.py" <<'PY'
 import hashlib
@@ -208,20 +269,24 @@ def bundle_roots(path):
     try:
         with open(path, encoding="ascii", errors="ignore") as fh:
             blocks = PEM.findall(fh.read())
+        # Decodable base64 alone does not establish a valid X.509 certificate.
+        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cafile=path)
     except Exception:
         return "empty"
     if not blocks:
         return "empty"  # a bundle with nothing to inspect is not a pass
     hits = set()
+    parsed = 0
     for block in blocks:
         try:
             der = ssl.PEM_cert_to_DER_cert(block)
         except Exception:
-            continue
+            return "empty"  # malformed certificates must never pass
+        parsed += 1
         name = DISTRUSTED.get(hashlib.sha256(der).hexdigest())
         if name:
             hits.add(name)
-    return "+".join(sorted(hits)) if hits else "clean"
+    return "+".join(sorted(hits)) if hits else ("clean" if parsed else "empty")
 
 
 def certifi_info(module):
@@ -252,9 +317,13 @@ def classify(exc):
 def via_stdlib(url):
     import urllib.error
     import urllib.request
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
     try:
-        urllib.request.urlopen(url, timeout=TIMEOUT).close()
-    except urllib.error.HTTPError:
+        urllib.request.build_opener(NoRedirect).open(url, timeout=TIMEOUT).close()
+    except urllib.error.HTTPError as exc:
+        exc.close()
         return "C"  # the TLS handshake succeeded; the server answered with an HTTP error
     except urllib.error.URLError as exc:
         return classify(exc.reason if exc.reason is not None else exc)
@@ -266,7 +335,9 @@ def via_stdlib(url):
 def via_requests(url):
     import requests
     try:
-        requests.get(url, timeout=TIMEOUT, stream=True).close()  # the handshake is the test, skip the body
+        # Suppress automatic .netrc credentials, retain proxy/CA environment settings.
+        requests.get(url, timeout=TIMEOUT, stream=True, allow_redirects=False,
+                     auth=lambda request: request).close()
     except Exception as exc:
         return classify(exc)
     return "C"
@@ -308,7 +379,7 @@ function probe(url) {
   return new Promise(resolve => {
     let done = false;
     const finish = r => { if (!done) { done = true; resolve(r); } };
-    const req = https.get(url, res => { res.resume(); finish('C'); });
+    const req = https.get(url, res => { res.destroy(); finish('C'); });
     req.setTimeout(10000, () => req.destroy(new Error('timeout')));
     req.on('error', e => finish(CERT_CODE.test(String(e.code || '')) ? 'B' : 'E'));
   });
@@ -321,33 +392,32 @@ function probe(url) {
   console.log([n('B'), n('C'), n('E'), c === 'C' ? 1 : 0].join('\t'));
   process.exit(0);
 })();
+setTimeout(() => process.exit(1), 65000).unref();
 JS
 
-# shellcheck disable=SC2086  # $TEST_URLS splits into one argument per URL on purpose
-py_probe() { "$1" -I "$TMP/probe.py" "$CONTROL_URL" $TEST_URLS 2>/dev/null </dev/null | tail -1; }
+py_probe() { run_timed 125 "$1" -I "$TMP/probe.py" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1; }
 
 curl_probe() { # prints: rejected connected errors control_ok
   local bin="$1" u rc b=0 c=0 e=0 ctl=0
-  for u in $TEST_URLS; do
-    "$bin" -sS -o /dev/null --connect-timeout 8 --max-time 15 "$u" >/dev/null 2>&1 </dev/null; rc=$?
+  for u in "${TEST_URLS[@]}"; do
+    "$bin" -q -sS --head -o /dev/null --connect-timeout 8 --max-time 15 "$u" >/dev/null 2>&1 </dev/null; rc=$?
     case $rc in 0) c=$((c + 1)) ;; 51|60|83|91) b=$((b + 1)) ;; *) e=$((e + 1)) ;; esac
   done
-  "$bin" -sS -o /dev/null --connect-timeout 8 --max-time 15 "$CONTROL_URL" >/dev/null 2>&1 </dev/null && ctl=1
+  "$bin" -q -sS --head -o /dev/null --connect-timeout 8 --max-time 15 "$CONTROL_URL" >/dev/null 2>&1 </dev/null && ctl=1
   echo "$b $c $e $ctl"
 }
 
 git_probe() { # prints: rejected connected errors control_ok
   local u out b=0 c=0 e=0 ctl=0
-  for u in $TEST_URLS; do
-    out=$(GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10 ls-remote "${u}probe.git" 2>&1 </dev/null)
+  for u in "${TEST_URLS[@]}"; do
+    out=$(git_tls "${u}probe.git" 2>&1 </dev/null)
     case "$out" in
       *"SSL certificate problem"*|*"certificate verify failed"*|*"server certificate verification failed"*|*"revoked"*) b=$((b + 1)) ;;
-      *"not found"*|*"returned error"*|*"not valid"*|*"not appear to be a git repository"*|*"Authentication failed"*|*"could not read Username"*) c=$((c + 1)) ;;
+      *"repository"*"not found"*|*"requested URL returned error: 404"*|*"not valid: is this a git repository"*|*"not appear to be a git repository"*) c=$((c + 1)) ;;
       *) e=$((e + 1)) ;;
     esac
   done
-  GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=10 \
-    ls-remote https://github.com/git/git.git HEAD >/dev/null 2>&1 </dev/null && ctl=1
+  git_tls https://github.com/git/git.git HEAD >/dev/null 2>&1 </dev/null && ctl=1
   echo "$b $c $e $ctl"
 }
 
@@ -355,7 +425,7 @@ aws_hit() { # aws_hit AWS URL: B certificate rejected, C handshake done (any HTT
   local out
   # Unsigned: no credentials are loaded or sent. One attempt, no instance metadata lookup, no pager.
   out=$(AWS_MAX_ATTEMPTS=1 AWS_RETRY_MODE=standard AWS_PAGER="" AWS_EC2_METADATA_DISABLED=true \
-    "$1" s3api list-buckets --no-sign-request --region us-east-1 --endpoint-url "$2" \
+    run_timed 25 "$1" s3api list-buckets --no-sign-request --region us-east-1 --endpoint-url "$2" \
     --cli-connect-timeout 8 --cli-read-timeout 10 2>&1 </dev/null)
   case "$out" in
     *CERTIFICATE_VERIFY_FAILED*|*"certificate verify failed"*) echo B ;;
@@ -367,7 +437,7 @@ aws_hit() { # aws_hit AWS URL: B certificate rejected, C handshake done (any HTT
 
 aws_probe() { # prints: rejected connected errors control_ok
   local u b=0 c=0 e=0 ctl=0
-  for u in $TEST_URLS; do
+  for u in "${TEST_URLS[@]}"; do
     case "$(aws_hit "$1" "$u")" in B) b=$((b + 1)) ;; C) c=$((c + 1)) ;; *) e=$((e + 1)) ;; esac
   done
   [ "$(aws_hit "$1" "$CONTROL_URL")" = C ] && ctl=1
@@ -377,7 +447,7 @@ aws_probe() { # prints: rejected connected errors control_ok
 aws_override() { # aws_override AWS: the CA bundle setting that replaces the CLI's own bundle, if any
   local cab
   if [ -n "${AWS_CA_BUNDLE:-}" ]; then echo "AWS_CA_BUNDLE=$AWS_CA_BUNDLE"; return; fi
-  cab=$("$1" configure get ca_bundle 2>/dev/null </dev/null)
+  cab=$(run_timed 10 "$1" configure get ca_bundle 2>/dev/null </dev/null)
   [ -n "$cab" ] && echo "ca_bundle=$cab in ~/.aws/config"
 }
 
@@ -393,7 +463,7 @@ py_candidates() {
     ls -1 "$HOME"/.pyenv/versions/*/bin/python3 2>/dev/null
     ls -1 "$HOME"/miniconda3/bin/python3 "$HOME"/anaconda3/bin/python3 "$HOME"/miniforge3/bin/python3 2>/dev/null
     # uv prints paths relative to the current directory when it can, so make them absolute.
-    has uv && uv python list --only-installed --managed-python 2>/dev/null </dev/null \
+    has uv && uv python list --only-installed --managed-python --no-cache 2>/dev/null </dev/null \
       | awk -v pwd="$PWD" '{ p = $2; if (substr(p, 1, 1) != "/") p = pwd "/" p; print p }'
   } | awk 'NF && !seen[$0]++'
 }
@@ -423,7 +493,7 @@ python_actions() { # python_actions PYTHON KIND VERSION
       f=$(echo "$rp" | sed -n 's|.*/Cellar/\(python@[0-9.]*\)/.*|\1|p')
       action "brew update && brew upgrade $f" ;;
     */uv/python/*)
-      action "uv Python $ver: its bundled pip trusts old roots. Install with uv, not python -m pip. If a newer build is installed: rm -rf .venv && uv sync in projects still on $ver, then uv python uninstall $ver" ;;
+      action "uv Python $ver: update uv and install a patched Python in the same minor line; recreate affected project venvs from their lock files after preserving local changes. Do not delete environments or uninstall runtimes before checking their dependents." ;;
     /Library/Frameworks/Python.framework/*)
       action "$(short "$py"): run 'Install Certificates.command' (in /Applications/Python 3.x), then $(short "$py") -m pip install -U 'pip>=$FIXED_PIP' 'certifi>=$FIXED_CERTIFI'" ;;
     /usr/bin/*|/bin/*)
@@ -448,7 +518,7 @@ check_python() { # check_python PYTHON KIND(interp|venv) LABEL
   # certifi packages keep an old version but read the system bundle.
   if [ "$pip" != "-" ]; then
     case "$pipr" in
-      -) det="$det | pip $pip uses the environment's certifi" ;;
+      -) v=$(worse "$v" INCONCLUSIVE); det="$det | pip $pip bundle not inspected" ;;
       clean) det="$det | pip $pip bundle clean" ;;
       empty) v=$(worse "$v" INCONCLUSIVE); det="$det | pip $pip bundle unreadable or empty" ;;
       *)
@@ -502,13 +572,11 @@ ACTIVE_NODE=""; ACTIVE_NODE_BAD=0; GOOD_BREW_NODE=""
 check_node() { # check_node NODE RESOLVED_PATH
   local n="$1" rp="$2" ver maj fixed out b c e ctl v where det note=""
   ver=$("$n" --version 2>/dev/null </dev/null)
-  # shellcheck disable=SC2086  # $TEST_URLS splits into one argument per URL on purpose
-  out=$("$n" "$TMP/probe.js" "$CONTROL_URL" $TEST_URLS 2>/dev/null </dev/null | tail -1)
+  out=$("$n" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
   # An old Node exits at startup on a NODE_OPTIONS flag it does not know: probe it without them.
   if [ -z "$out" ] && [ -n "${NODE_OPTIONS:-}" ]; then
     ver=$(env -u NODE_OPTIONS "$n" --version 2>/dev/null </dev/null)
-    # shellcheck disable=SC2086  # $TEST_URLS splits into one argument per URL on purpose
-    out=$(env -u NODE_OPTIONS "$n" "$TMP/probe.js" "$CONTROL_URL" $TEST_URLS 2>/dev/null </dev/null | tail -1)
+    out=$(env -u NODE_OPTIONS "$n" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
     [ -n "$out" ] && note=" (probed without NODE_OPTIONS, which this Node rejects)"
   fi
   ver=${ver#v}
@@ -568,14 +636,15 @@ roots_in_fps() { # roots_in_fps FILE: FILE holds one SHA-256 per line; prints cl
 }
 
 bundle_roots_openssl() { # bundle_roots_openssl FILE: the Python checker's answer, via the openssl CLI
-  local dir="$TMP/split" c
+  local dir="$TMP/split" c invalid=0
   rm -rf "$dir"; mkdir -p "$dir"
   awk -v d="$dir" '/-----BEGIN CERTIFICATE-----/ { n++; f = d "/" n ".pem" } f { print > f }
     /-----END CERTIFICATE-----/ { close(f); f = "" }' "$1"
   for c in "$dir"/*.pem; do
     [ -f "$c" ] || continue
-    openssl x509 -in "$c" -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g'
+    openssl x509 -in "$c" -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//; s/://g' || invalid=1
   done > "$TMP/split.fps"
+  [ "$invalid" -eq 0 ] || { echo empty; return; }
   roots_in_fps "$TMP/split.fps"
 }
 
@@ -585,8 +654,10 @@ bundle_check() { # bundle_check FILE: clean, empty, ROOT+ROOT, or "" when neithe
 }
 
 java_store_roots() { # java_store_roots STORE KEYTOOL: clean, empty or ROOT+ROOT
-  "$2" -J-Duser.language=en -list -v -keystore "$1" -storepass changeit 2>/dev/null </dev/null \
-    | awk '/^[[:space:]]*SHA256:/ { sub(/.*SHA256:[[:space:]]*/, ""); gsub(/:/, ""); print }' > "$TMP/java.fps"
+  if ! run_timed 25 "$2" -J-Duser.language=en -list -v -keystore "$1" -storepass changeit 2>/dev/null </dev/null \
+    | awk '/^[[:space:]]*SHA256:/ { sub(/.*SHA256:[[:space:]]*/, ""); gsub(/:/, ""); print }' > "$TMP/java.fps"; then
+    echo empty; return
+  fi
   roots_in_fps "$TMP/java.fps"
 }
 
@@ -635,25 +706,35 @@ else OS_LABEL="$( { . /etc/os-release && printf '%s' "$PRETTY_NAME"; } 2>/dev/nu
 echo "${BLD}== eMudhra CA compromise: $OS check (read-only), emudhra-cli-trust-check $VERSION ==${RST}"
 echo "  $OS_LABEL | $(date '+%Y-%m-%d %H:%M') | fixed versions as of $AS_OF"
 echo "  tracker: $TRACKER"
-echo "  OK = rejects all $NH test chains and still reaches $CONTROL_URL"
+echo "  OK (TLS) = rejects all $NH test chains and still reaches $CONTROL_URL"
+echo "  VERSION_OK = version check only; bundle/content checks are labelled separately"
+echo "  Scope: discovered tools only; browsers, containers and all project environments are not covered by default"
 if [ "$TLS_EXPIRED" = 1 ]; then
   echo "  ${YEL}The test hosts' certificates expired on 2027-05-03: TLS tests can no longer tell a trusting"
   echo "  client from a rejecting one and report INCONCLUSIVE. Trust store content and version checks still apply.${RST}"
 fi
 
+section "TLS verification overrides"
+for override in GIT_SSL_NO_VERIFY NODE_TLS_REJECT_UNAUTHORIZED PYTHONHTTPSVERIFY; do
+  value="${!override-}"
+  case "$override:$value" in
+    GIT_SSL_NO_VERIFY:1|GIT_SSL_NO_VERIFY:true|GIT_SSL_NO_VERIFY:yes|NODE_TLS_REJECT_UNAUTHORIZED:0|PYTHONHTTPSVERIFY:0)
+      row VULNERABLE "$override" "environment disables certificate verification; remove the override" ;;
+  esac
+done
+
 section "Homebrew"
 if has brew; then
   list=$(brew_affected_installed)
   if [ -n "$list" ]; then
-    # shellcheck disable=SC2086  # $list is a space-separated formula list
-    brew list --formula --versions $list 2>/dev/null | sed 's/^/  /'
-    # shellcheck disable=SC2086
-    outdated=$(brew outdated --formula --verbose $list 2>/dev/null)
+    read -r -a brew_formulae <<< "$list"
+    brew list --formula --versions "${brew_formulae[@]}" 2>/dev/null | sed 's/^/  /'
+    outdated=$(brew outdated --formula --verbose "${brew_formulae[@]}" 2>/dev/null)
     if [ -n "$outdated" ]; then
       row OUTDATED "affected formulae" "$(echo "$outdated" | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
       action "brew update && brew upgrade $(echo "$outdated" | awk '{print $1}' | tr '\n' ' ')"
     else
-      row OK "affected formulae" "up to date"
+      row VERSION_OK "affected formulae" "no upgrade shown by local Homebrew metadata; run brew update separately to refresh"
     fi
   fi
 else
@@ -695,6 +776,7 @@ while IFS= read -r bf <&3; do
 done 3< "$TMP/bundles"
 
 section "curl"
+echo "  without .curlrc; proxy and CA environment settings apply"
 for cb in /usr/bin/curl "$BREW_PREFIX/opt/curl/bin/curl"; do
   [ -x "$cb" ] || continue
   read -r b c e ctl <<< "$(curl_probe "$cb")"
@@ -722,7 +804,7 @@ if has git; then
   # git treats false/no/off/0 as off; --get-regexp prints "key value".
   insecure=$( { git config --global --get-regexp '^http\..*sslverify$'; git config --system --get-regexp '^http\..*sslverify$'; } 2>/dev/null | grep -iE '[[:space:]](false|no|off|0)$')
   if [ -n "$insecure" ]; then
-    row VULNERABLE "git config" "TLS verification disabled: $insecure"
+    row VULNERABLE "git config" "TLS verification is disabled in a global/system git setting (values redacted)"
     action "Remove http.sslVerify=false from your git config (git config --global --unset http.sslVerify)"
   fi
 else
@@ -748,7 +830,7 @@ section "uv"
 if has uv; then
   uvv=$(uv --version 2>/dev/null | awk '{print $2}')
   if ver_ge "$uvv" "$FIXED_UV"; then
-    row OK "uv $uvv" "its bundled root store is fixed from $FIXED_UV"
+    row VERSION_OK "uv $uvv" "its bundled root store is fixed from $FIXED_UV"
   else
     row VULNERABLE "uv $uvv" "uv ships its own root store; fixed in $FIXED_UV"
     case "$(resolve "$(command -v uv)")" in
@@ -767,7 +849,7 @@ while IFS= read -r a <&3; do
   rp=$(resolve "$a")
   case "$seen" in *"|$rp|"*) continue ;; esac
   seen="$seen$rp|"
-  av=$("$a" --version 2>&1 </dev/null | awk '{print $1}'); av=${av#aws-cli/}
+  av=$(run_timed 10 "$a" --version 2>&1 </dev/null | awk '{print $1}'); av=${av#aws-cli/}
   read -r b c e ctl <<< "$(aws_probe "$a")"
   v=$(verdict "$b" "$c" "$e" "$ctl")
   det="TLS $(brief "$v" "$b" "$ctl")"
@@ -780,7 +862,8 @@ while IFS= read -r a <&3; do
     if [ -f "$own" ]; then
       res=$(bundle_check "$own")
       case "$res" in
-        ""|clean|empty) : ;;
+        clean) : ;;
+        ""|empty) v=$(worse "$v" INCONCLUSIVE); det="$det | its own CA bundle could not be inspected" ;;
         *) v=$(worse "$v" VULNERABLE); det="$det | its own botocore/cacert.pem trusts $res" ;;
       esac
     fi
@@ -825,7 +908,7 @@ if [ "$ACTIVE_NODE_BAD" = 1 ]; then
   if [ -n "$GOOD_BREW_NODE" ]; then
     action "Make the fixed Homebrew Node the default: brew link --force --overwrite $GOOD_BREW_NODE && hash -r && node --version"
   elif has brew; then
-    action "Install a fixed Node (22.23.4+, 24.22.1+ or 26.12.1+): brew install node@24 && brew link --force --overwrite node@24 (or via nvm/volta/fnm)"
+    action "Update Node in its existing major line to 22.23.4+, 24.22.1+ or 26.12.1+ using its package manager. Check PATH and dependents before changing Homebrew links."
   else
     action "Install a fixed Node (22.23.4+, 24.22.1+ or 26.12.1+) with the tool that manages the active one (nvm/volta/fnm or the distro package), then hash -r && node --version"
   fi
@@ -870,21 +953,20 @@ if [ -s "$TMP/jvms" ]; then
         *) roots=$res; det="$(basename "$store") still has $res" ;;
       esac
     else
-      det="cacerts not checked (no keytool)"
+      v=$(worse "$v" INCONCLUSIVE); det="trust store not checked (keytool or store missing)"
     fi
     # Real TLS test, only where a compiler ships (a JDK; a plain JRE cannot run source files).
     if [ -x "$jh/bin/javac" ]; then
       jdir="$TMP/java.$(printf '%s' "$jh" | cksum | cut -d' ' -f1)"; mkdir -p "$jdir"
       out=""
-      if "$jh/bin/javac" -nowarn -d "$jdir" "$TMP/T.java" >/dev/null 2>&1 </dev/null; then
-        # shellcheck disable=SC2086  # $TEST_URLS splits into one argument per URL on purpose
-        out=$("$jh/bin/java" -cp "$jdir" T "$CONTROL_URL" $TEST_URLS 2>/dev/null </dev/null | tail -1)
+      if run_timed 25 "$jh/bin/javac" -nowarn -d "$jdir" "$TMP/T.java" >/dev/null 2>&1 </dev/null; then
+        out=$(run_timed 65 "$jh/bin/java" -cp "$jdir" T "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
       fi
       if [ -n "$out" ]; then
         IFS=$'\t' read -r b c e ctl <<< "$out"
         tls=$(verdict "$b" "$c" "$e" "$ctl"); v=$(worse "$v" "$tls"); det="$det | TLS $(brief "$tls" "$b" "$ctl")"
       else
-        det="$det | TLS test did not run"
+        v=$(worse "$v" INCONCLUSIVE); det="$det | TLS test did not run"
       fi
     fi
     # Release check: older than the fixed update is OUTDATED even with a clean store.
@@ -907,8 +989,9 @@ if [ -s "$TMP/jvms" ]; then
         action "Java $jv ($(short "$jh")): update it, or remove $roots from $(short "$store") with keytool -delete -keystore <store> -storepass changeit -alias <alias> (find the alias by its SHA-256 in keytool -list -v)"
       fi
     fi
+    if [ "$v" = OK ] && [ "$tls" != OK ]; then v=VERSION_OK; fi
     row "$v" "Java $jv  $(short "$jh")" "$det"
-    if [ "$v" != OK ]; then
+    if [ "$v" != OK ] && [ "$v" != VERSION_OK ]; then
       case "$OS:$jv" in
         Darwin:1.8.0_*) jhint=" (e.g. brew install --cask corretto@8)" ;;
         Darwin:*) jhint="" ;;
@@ -926,7 +1009,7 @@ if has go; then
   gv=$(go version 2>/dev/null | awk '{print $3}'); gv=${gv#go}
   # 1.26.x needs 1.26.10; anything else is compared with 1.27.3, so 1.28+ passes and <1.26 does not.
   case "$gv" in 1.26.*) fixed=1.26.10 ;; *) fixed=1.27.3 ;; esac
-  if ver_ge "$gv" "$fixed"; then row OK "go $gv" "fixed from $fixed"
+  if ver_ge "$gv" "$fixed"; then row VERSION_OK "go $gv" "fixed from $fixed"
   else
     if [ "$OS" = Darwin ]; then gnote="on macOS Go uses the system verifier; matters for Linux builds"
     else gnote="on Linux Go reads the system CA bundle, so also keep ca-certificates updated"; fi
@@ -944,7 +1027,7 @@ app_check() { # app_check NAME FIXED BUNDLE_NAME
     [ -d "$app" ] || continue
     v=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Contents/Info.plist" 2>/dev/null)
     [ -n "$v" ] || continue
-    if ver_ge "$v" "$2"; then row OK "$1 $v" "fixed from $2"
+    if ver_ge "$v" "$2"; then row VERSION_OK "$1 $v" "fixed from $2"
     else row OUTDATED "$1 $v" "fixed in $2"; action "Update $1 to $2 or later (built-in updater)"; fi
     return
   done
@@ -957,14 +1040,14 @@ else
   if has code; then
     cv=$(code --version 2>/dev/null </dev/null | head -1)
     if [ -z "$cv" ]; then :
-    elif ver_ge "$cv" "$FIXED_VSCODE"; then row OK "Visual Studio Code $cv" "fixed from $FIXED_VSCODE"
+    elif ver_ge "$cv" "$FIXED_VSCODE"; then row VERSION_OK "Visual Studio Code $cv" "fixed from $FIXED_VSCODE"
     else row OUTDATED "Visual Studio Code $cv" "fixed in $FIXED_VSCODE"; action "Update Visual Studio Code to $FIXED_VSCODE or later (distro package or built-in updater)"; fi
   fi
   echo "  Docker Desktop and Obsidian are not checked on Linux: compare their versions with the tracker by hand."
 fi
 if has claude; then
   cv=$(claude --version 2>/dev/null </dev/null | awk '{print $1}')
-  if ver_ge "$cv" "$FIXED_CLAUDE"; then row OK "Claude Code $cv" "fixed from $FIXED_CLAUDE"
+  if ver_ge "$cv" "$FIXED_CLAUDE"; then row VERSION_OK "Claude Code $cv" "fixed from $FIXED_CLAUDE"
   else row OUTDATED "Claude Code $cv" "fixed in $FIXED_CLAUDE"; action "Update Claude Code (claude update)"; fi
 fi
 echo "  Other Electron apps carry their own Chromium: keep them updated."
@@ -973,7 +1056,9 @@ if [ -n "$SCAN_DIRS" ]; then
   while IFS= read -r d <&3; do
     [ -n "$d" ] || continue
     section "Virtualenvs under $(short "$d")"
-    venv_list "$d" > "$TMP/venvs"
+    if ! venv_list "$d" > "$TMP/venvs"; then
+      row INCONCLUSIVE "virtualenv discovery" "some paths could not be read"
+    fi
     if [ ! -s "$TMP/venvs" ]; then echo "  none found"; fi
     while IFS= read -r vd <&4; do
       if [ -x "$vd/bin/python" ]; then check_python "$vd/bin/python" venv "$(short "$vd")"
@@ -982,16 +1067,26 @@ if [ -n "$SCAN_DIRS" ]; then
 
     section "Disabled TLS verification under $(short "$d")"
     # Source and config files only, size-capped: a plain recursive grep over data fixtures takes minutes.
+    scan_status=0
     find "$d" \( -name .git -o -name node_modules -o -name .venv -o -name venv -o -name site-packages -o -name dist \
         -o -name build -o -name cdk.out -o -name .terraform -o -name .cache -o -name .claude -o -name __pycache__ \) -prune \
       -o -type f -size -512k \( -name '*.py' -o -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.ts' \
         -o -name '*.go' -o -name '*.java' -o -name '*.sh' -o -name '*.yml' -o -name '*.yaml' -o -name '*.toml' \
         -o -name '*.cfg' -o -name '*.ini' -o -name '*.json' -o -name '*.tf' -o -name '*.properties' \
         -o -name '.env*' -o -name '.npmrc' -o -name 'Dockerfile*' -o -name 'Makefile' -o -name '*.mk' \
-        -o -name '.condarc' -o -name '.wgetrc' -o -name 'pip.conf' -o -name 'pip.ini' -o -name 'Jenkinsfile' \) -print0 2>/dev/null \
-      | xargs -0 grep -HnIE \
+        -o -name '.condarc' -o -name '.wgetrc' -o -name 'pip.conf' -o -name 'pip.ini' -o -name 'Jenkinsfile' \) -print0 > "$TMP/source-files" 2>/dev/null || scan_status=1
+    # shellcheck disable=SC2016  # expanded intentionally by the child shell
+    xargs -0 /bin/sh -c '
+      pattern=$1; shift
+      [ "$#" -gt 0 ] || exit 0
+      grep -HnIE "$pattern" "$@"
+      result=$?
+      [ "$result" -le 1 ]
+    ' sh \
         'sslVerify[[:space:]]*=[[:space:]]*false|strict-ssl[[:space:]=]+false|NODE_TLS_REJECT_UNAUTHORIZED[^0-9A-Za-z]{0,4}0|PYTHONHTTPSVERIFY[^0-9A-Za-z]{0,4}0|verify[[:space:]]*=[[:space:]]*False|_create_unverified_context|rejectUnauthorized[[:space:]]*:[[:space:]]*false|InsecureSkipVerify[[:space:]]*:[[:space:]]*true|--no-check-certificate|check_certificate[[:space:]]*=[[:space:]]*off|curl[^#|;&]*[[:space:]](-[A-Za-z]*k[A-Za-z]*|--insecure)([[:space:]]|$)|--trusted-host|PIP_TRUSTED_HOST|trusted-host[[:space:]]*=|GIT_SSL_NO_VERIFY|ssl_verify[[:space:]]*:[[:space:]]*(false|no)' \
-        2>/dev/null > "$TMP/insecure"
+        < "$TMP/source-files" 2>/dev/null | awk 'match($0, /:[0-9]+:/) { print substr($0, 1, RSTART + RLENGTH - 2) }' > "$TMP/insecure" || scan_status=1
+    # The wrapper maps grep's no-match result to success; read errors remain errors.
+    if [ "$scan_status" -ne 0 ]; then row INCONCLUSIVE "source scan" "one or more files could not be inspected"; fi
     hits=$(wc -l < "$TMP/insecure" | tr -d ' ')
     if [ "$hits" -eq 0 ]; then
       row OK "no matches"
@@ -1016,4 +1111,6 @@ if [ -s "$TMP/actions" ]; then
 fi
 [ "$INCONC" -gt 0 ] && echo "  Inconclusive rows mean a test host or the control site was unreachable: check the network and re-run."
 [ "$VULN" -gt 0 ] && exit 1
+[ "$INCONC" -gt 0 ] && exit 3
+[ "$WARN" -gt 0 ] && exit 4
 exit 0

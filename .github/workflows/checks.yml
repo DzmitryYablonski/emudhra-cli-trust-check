@@ -1,0 +1,70 @@
+name: Checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bash syntax
+        run: bash -n emudhra-cli-trust-check.sh
+      - name: ShellCheck
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v shellcheck >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes shellcheck
+          fi
+          shellcheck emudhra-cli-trust-check.sh
+      - name: Regression tests (offline)
+        run: python3 tests/check.py
+      - name: Package integrity
+        run: shasum -a 256 -c SHA256SUMS
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Windows PowerShell 5.1 regression and TLS tests
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: ./tests/windows.ps1
+      - name: PowerShell 7 regression and TLS tests
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: ./tests/windows.ps1
+      - name: PowerShell ScriptAnalyzer
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Repository PSGallery -Force
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0
+          $findings = @(Invoke-ScriptAnalyzer -Path windows -Recurse -Severity Warning,Error)
+          $findings | Format-Table -AutoSize
+          if ($findings.Count) { throw 'PowerShell analysis failed.' }
+      - name: Package integrity
+        shell: powershell
+        run: |
+          foreach ($line in Get-Content SHA256SUMS) {
+            $parts = $line -split '  ', 2
+            if ((Get-FileHash -Algorithm SHA256 $parts[1]).Hash -ne $parts[0]) {
+              throw ('Checksum mismatch: ' + $parts[1])
+            }
+          }
