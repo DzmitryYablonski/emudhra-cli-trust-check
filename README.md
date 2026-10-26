@@ -182,10 +182,10 @@ This one focuses on the CLI tools and runtimes on a developer machine, and tests
 
 ## Version history
 
-- **7.4.0** (2026-10-26): the Node.js probe runs outside the current directory too, so version managers such as volta, asdf and mise no longer pick a project's Node. A `node` that is really Bun is tested once, in the Bun section, instead of running a project's `bunfig.toml` `preload` and showing a version-less Node row. By Artsiom Lykau ([#7](https://github.com/DzmitryYablonski/emudhra-cli-trust-check/pull/7)).
-- **7.3.0** (2026-10-26): Bun gets a real TLS test with the same probe as Node.js, and installs in `~/.bun/bin` and Homebrew are found too. The probe runs outside the current directory, so a project's `bunfig.toml` `preload` or `.env` cannot run. By Artsiom Lykau ([#6](https://github.com/DzmitryYablonski/emudhra-cli-trust-check/pull/6)).
+- **7.4.0** (2026-10-26): the Node.js probe runs outside the current directory too, so version managers such as volta, asdf and mise no longer pick a project's Node. A `node` that is really Bun is tested once, in the Bun section, instead of running a project's `bunfig.toml` `preload` and showing a version-less Node row. By Artsiom Lykau.
+- **7.3.0** (2026-10-26): Bun gets a real TLS test with the same probe as Node.js, and installs in `~/.bun/bin` and Homebrew are found too. The probe runs outside the current directory, so a project's `bunfig.toml` `preload` or `.env` cannot run. By Artsiom Lykau.
 - **7.2.0** (2026-10-25): Java is judged by its `cacerts` content. No release fixes JDK-8395690 (CVE-2026-114820) yet, so any of the roots OpenJDK says to remove is `OUTDATED`, including emSign Root CA - G1 and G2, even when the TLS test passes. Releases older than October 2026 are `OUTDATED` too. New checks cover Perl Mozilla::CA and the versions of Bun, Deno, GitHub CLI, Docker CLI, conda and rustup. The README gained a list of related advisories.
-- **7.1.0** (2026-10-25): diagnostic hardening. Incomplete probes, malformed bundles and failed Java checks no longer pass. Probes have time limits and no longer pick up your git credentials, `.netrc` or `.curlrc`, and `~/.curlrc` is checked on its own for `insecure` and `cacert`. `--scan` prints only file names and line numbers. Environment variables that turn TLS verification off are reported. `VERSION_OK` marks version-only checks, and `--strict` adds exit codes 3 and 4. Regression tests and CI were added. Mostly by Stanislav Stolberg ([#2](https://github.com/DzmitryYablonski/emudhra-cli-trust-check/pull/2)).
+- **7.1.0** (2026-10-25): diagnostic hardening. Incomplete probes, malformed bundles and failed Java checks no longer pass. Probes have time limits and no longer pick up your git credentials, `.netrc` or `.curlrc`, and `~/.curlrc` is checked on its own for `insecure` and `cacert`. `--scan` prints only file names and line numbers. Environment variables that turn TLS verification off are reported. `VERSION_OK` marks version-only checks, and `--strict` adds exit codes 3 and 4. Regression tests and CI were added. Mostly by Stanislav Stolberg.
 - **7.0.0** (2026-10-24): the first public release. Compared with v6 it adds the AWS CLI check (TLS test, bundled `cacert.pem` and version) and botocore's fallback bundle in venvs without certifi. TLS tests also stop reporting OK once the test certificates expire.
 - **1 to 6:** used internally as `certificate-check-vN.sh` before the public release.
 
@@ -203,8 +203,8 @@ bash tests/docker/assert.sh emudhra-e2e-broken tests/docker/broken.expect
 ## Credits
 
 - The test hosts and the incident data come from the [eMudhra incident tracker](https://emudhra.we-have-a-problem.com/).
-- [Stanislav Stolberg](https://github.com/stanistolberg): diagnostic hardening, regression tests and CI ([#2](https://github.com/DzmitryYablonski/emudhra-cli-trust-check/pull/2)).
-- [Artsiom Lykau](https://github.com/artsiom-lykau): the Bun TLS check ([#6](https://github.com/DzmitryYablonski/emudhra-cli-trust-check/pull/6)), and running the Node.js and Bun probes outside the current directory, with a `node` that is really Bun handed to the Bun section ([#7](https://github.com/DzmitryYablonski/emudhra-cli-trust-check/pull/7)).
+- [Stanislav Stolberg](https://github.com/stanistolberg): diagnostic hardening, regression tests and CI.
+- [Artsiom Lykau](https://github.com/artsiom-lykau): the Bun TLS check, and running the Node.js and Bun probes outside the current directory, with a `node` that is really Bun handed to the Bun section.
 
 <!-- TODO before publishing: credit the contributor who added Linux support. -->
 
