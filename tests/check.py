@@ -173,6 +173,21 @@ class Diagnostics(unittest.TestCase):
             self.assertNotIn('secret-helper', p.stdout)
             self.assertNotIn('insteadof', p.stdout)
 
+    def test_bun_runs_outside_the_working_directory(self):
+        # Bun loads bunfig.toml (preload) and .env from its working directory: the probe must not run in a project.
+        start = SOURCE.index('  bv=$(cd "$TMP"')
+        end = SOURCE.index('  if [ -z "$out" ]', start)
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as project:
+            fake = Path(d) / 'bun'
+            fake.write_text('#!/bin/sh\npwd -P\n')
+            fake.chmod(0o700)
+            code = ('TMP=$1; bn=$2; CONTROL_URL=x; TEST_URLS=()\n' + function('run_timed') + '\n' +
+                    SOURCE[start:end] + '\necho "$bv|$out"')
+            p = subprocess.run(['bash', '-c', code, '--', d, str(fake)], capture_output=True, text=True,
+                               timeout=10, cwd=project)
+            real = os.path.realpath(d)
+            self.assertEqual(p.stdout.strip(), real + '|' + real, p.stderr)
+
     def test_requests_does_not_send_netrc_credentials_or_follow_redirects(self):
         namespace = {}
         with mock.patch.dict(os.environ, DISTRUSTED_ROOTS=ROOTS), mock.patch.object(sys, 'argv', ['probe', 'control']):

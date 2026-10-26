@@ -976,8 +976,9 @@ while IFS= read -r bn <&3; do
   rp=$(resolve "$bn")
   case "$seen" in *"|$rp|"*) continue ;; esac
   seen="$seen$rp|"
-  bv=$(run_timed 10 "$bn" --version 2>/dev/null </dev/null)
-  out=$(run_timed 70 "$bn" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
+  # From $TMP: Bun reads bunfig.toml (whose preload runs project code) and .env from the working directory.
+  bv=$(cd "$TMP" && run_timed 10 "$bn" --version 2>/dev/null </dev/null)
+  out=$(cd "$TMP" && run_timed 70 "$bn" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
   if [ -z "$out" ]; then row BROKEN "bun $bv  $(short "$bn")" "could not run the probe"; continue; fi
   IFS=$'\t' read -r b c e ctl <<< "$out"
   v=$(verdict "$b" "$c" "$e" "$ctl")
