@@ -9,7 +9,7 @@ umask 077
 export HOMEBREW_NO_AUTO_UPDATE=1
 
 # Versions 1 to 6 were used internally (certificate-check-vN.sh); 7.0.0 is the first public release.
-VERSION="7.3.0"
+VERSION="7.4.0"
 # The fixed versions below were checked on this date; newer releases may have shipped since.
 AS_OF="2026-10-25"
 TRACKER="https://emudhra.we-have-a-problem.com"
