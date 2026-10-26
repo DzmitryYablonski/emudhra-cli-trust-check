@@ -192,6 +192,13 @@ This one focuses on the CLI tools and runtimes on a developer machine, and tests
 
 Tests and CI are development tooling only: `python3 tests/check.py`, `shellcheck emudhra-cli-trust-check.sh`. GitHub Actions runs these on macOS and Linux. Release users still need only the script and its single SHA-256 entry.
 
+`tests/docker/` holds two Linux fixtures pinned by digest: `broken`, with known vulnerable tools, and `fixed`. CI builds both, runs the script in each against the live test hosts, and compares the exit code and verdict rows with the matching `.expect` file. The job is non-blocking, because an unreachable test host should not stop a merge. To run it locally:
+
+```bash
+docker build -f tests/docker/broken.Dockerfile -t emudhra-e2e-broken tests/docker
+bash tests/docker/assert.sh emudhra-e2e-broken tests/docker/broken.expect
+```
+
 ## Credits
 
 - The test hosts and the incident data come from the [eMudhra incident tracker](https://emudhra.we-have-a-problem.com/).

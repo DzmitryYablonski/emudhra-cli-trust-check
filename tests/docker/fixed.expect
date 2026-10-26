@@ -1,0 +1,11 @@
+# exit CODE, then VERDICT LABEL-SUBSTRING rows that must appear ("none VERDICT": no such rows).
+exit 0
+none VULNERABLE
+none INCONCLUSIVE
+OK curl
+OK git
+OK /usr/bin/python3
+OK aws 2.38.5
+OK node 22.23.4
+OK bun 1.4.4
+OK /opt/fixed-certifi/.venv
