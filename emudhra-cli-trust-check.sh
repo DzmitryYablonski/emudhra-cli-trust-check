@@ -41,8 +41,11 @@ FIXED_DOCKER="4.96.2"
 FIXED_OBSIDIAN="1.14.5"
 FIXED_CLAUDE="2.1.303"
 FIXED_MOZILLA_CA="20261020"  # Perl, CVE-2026-113812
+# Bun ships its own root store ("root certificates are updated to NSS 3.131.1" in 1.4.4): 1.3.x accepts
+# the direct G3 test chains, 1.4.4 rejects all 4 as revoked.
+FIXED_BUN="1.4.4"
 # Version-only checks for tools that ship their own root store or TLS stack (tracker list).
-FIXED_BUN="1.4.4"; FIXED_DENO="2.9.8"; FIXED_GH="2.102.1"; FIXED_DOCKER_CLI="29.9.2"; FIXED_CONDA="26.9.4"; FIXED_RUSTUP="1.29.2"
+FIXED_DENO="2.9.8"; FIXED_GH="2.102.1"; FIXED_DOCKER_CLI="29.9.2"; FIXED_CONDA="26.9.4"; FIXED_RUSTUP="1.29.2"
 
 # The roots the compromised intermediates chain to, one "SHA-256 of the DER certificate:name" per
 # line: the single list behind every content check (Python probe, system bundles, Java cacerts,
@@ -71,10 +74,11 @@ Usage:
   bash emudhra-cli-trust-check.sh --help        this text
 
 What it checks:
-  curl, git, every Python interpreter (stdlib TLS, pip, certifi, requests), every Node.js and
-  the AWS CLI are tested against the incident's 4 test chains. uv, AWS CLI v2, Go, Bun, Deno,
-  GitHub CLI, Docker CLI, conda, rustup, VS Code, Docker Desktop, Obsidian and Claude Code
-  are compared with their fixed releases. Perl's Mozilla::CA bundle is checked by content.
+  curl, git, every Python interpreter (stdlib TLS, pip, certifi, requests), every Node.js,
+  every Bun and the AWS CLI are tested against the incident's 4 test chains. uv, AWS CLI v2,
+  Go, Deno, GitHub CLI, Docker CLI, conda, rustup, VS Code, Docker Desktop, Obsidian and
+  Claude Code are compared with their fixed releases. Perl's Mozilla::CA bundle is checked
+  by content.
   ~/.curlrc is checked separately for insecure (-k) and cacert/capath, since the probes skip it.
   Trust stores are judged by content: the system CA bundles, certifi, pip's vendored certifi,
   botocore's own bundle (used when certifi is absent), the AWS CLI's bundle and every Java
@@ -743,7 +747,7 @@ public class T {
 JAVA
 
 brew_affected_installed() {
-  brew list --formula -1 2>/dev/null | grep -E '^(ca-certificates|curl|git|uv|node(@[0-9]+)?|python@3\.[0-9]+)$' | tr '\n' ' '
+  brew list --formula -1 2>/dev/null | grep -E '^(bun|ca-certificates|curl|git|uv|node(@[0-9]+)?|python@3\.[0-9]+)$' | tr '\n' ' '
 }
 
 # ---------------------------------------------------------------- report
@@ -963,6 +967,34 @@ if [ "$ACTIVE_NODE_BAD" = 1 ]; then
   fi
 fi
 
+section "Bun"
+# ~/.bun/bin is the installer's default and is often missing from a non-interactive PATH.
+{ type -ap bun 2>/dev/null; ls -1 "$HOME/.bun/bin/bun" "$BREW_PREFIX/opt/bun/bin/bun" 2>/dev/null; } | awk 'NF && !s[$0]++' > "$TMP/bun_paths"
+seen="|"
+while IFS= read -r bn <&3; do
+  [ -x "$bn" ] || continue
+  rp=$(resolve "$bn")
+  case "$seen" in *"|$rp|"*) continue ;; esac
+  seen="$seen$rp|"
+  # From $TMP: Bun reads bunfig.toml (whose preload runs project code) and .env from the working directory.
+  bv=$(cd "$TMP" && run_timed 10 "$bn" --version 2>/dev/null </dev/null)
+  out=$(cd "$TMP" && run_timed 70 "$bn" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
+  if [ -z "$out" ]; then row BROKEN "bun $bv  $(short "$bn")" "could not run the probe"; continue; fi
+  IFS=$'\t' read -r b c e ctl <<< "$out"
+  v=$(verdict "$b" "$c" "$e" "$ctl")
+  det="TLS $(brief "$v" "$b" "$ctl")"
+  if ver_ge "$bv" "$FIXED_BUN"; then det="$det | fixed from $FIXED_BUN"
+  else v=$(worse "$v" OUTDATED); det="$det | fixed in $FIXED_BUN (its root store is built in: ca-certificates and --use-system-ca do not remove the roots)"; fi
+  row "$v" "bun $bv  $(short "$bn")" "$det"
+  [ "$v" = OK ] && continue
+  case "$rp" in
+    */Cellar/bun/*) action "brew update && brew upgrade bun" ;;
+    */node_modules/bun/*) action "Bun at $(short "$bn"): npm install -g bun@latest (or update it with the tool that installed it)" ;;
+    *) action "$(short "$bn") upgrade   (Bun $bv; fixed in $FIXED_BUN)" ;;
+  esac
+done 3< "$TMP/bun_paths"
+[ "$seen" = "|" ] && echo "  Bun not found"
+
 section "Java (cacerts content; TLS test when javac is present)"
 if [ "$OS" = Darwin ]; then
   /usr/libexec/java_home -V 2>&1 | sed -n 's|.*[[:space:]]\(/.*\)$|\1|p' > "$TMP/jvms.raw"
@@ -1083,7 +1115,6 @@ tool_check() { # tool_check NAME FIXED PREFIX CMD...: version-only check; skippe
 }
 
 section "Other tools (version check only)"
-tool_check Bun "$FIXED_BUN" "^" bun --version
 tool_check Deno "$FIXED_DENO" "^deno " deno --version
 tool_check "GitHub CLI" "$FIXED_GH" "gh version " gh --version
 tool_check "Docker CLI" "$FIXED_DOCKER_CLI" "Docker version " docker --version
