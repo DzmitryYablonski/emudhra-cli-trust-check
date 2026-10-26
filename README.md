@@ -182,6 +182,7 @@ This one focuses on the CLI tools and runtimes on a developer machine, and tests
 
 ## Version history
 
+- **7.4.0** (unreleased): the Node.js probe runs outside the current directory too, so version managers such as volta, asdf and mise no longer pick a project's Node. A `node` that is really Bun is tested once, in the Bun section, instead of running a project's `bunfig.toml` `preload` and showing a version-less Node row.
 - **7.3.0** (2026-10-26): Bun gets a real TLS test with the same probe as Node.js, and installs in `~/.bun/bin` and Homebrew are found too. The probe runs outside the current directory, so a project's `bunfig.toml` `preload` or `.env` cannot run.
 - **7.2.0** (2026-10-25): Java is judged by its `cacerts` content. No release fixes JDK-8395690 (CVE-2026-114820) yet, so any of the roots OpenJDK says to remove is `OUTDATED`, including emSign Root CA - G1 and G2, even when the TLS test passes. Releases older than October 2026 are `OUTDATED` too. New checks cover Perl Mozilla::CA and the versions of Bun, Deno, GitHub CLI, Docker CLI, conda and rustup. The README gained a list of related advisories.
 - **7.1.0** (2026-10-25): diagnostic hardening. Incomplete probes, malformed bundles and failed Java checks no longer pass. Probes have time limits and no longer pick up your git credentials, `.netrc` or `.curlrc`, and `~/.curlrc` is checked on its own for `insecure` and `cacert`. `--scan` prints only file names and line numbers. Environment variables that turn TLS verification off are reported. `VERSION_OK` marks version-only checks, and `--strict` adds exit codes 3 and 4. Regression tests and CI were added.
@@ -203,7 +204,7 @@ bash tests/docker/assert.sh emudhra-e2e-broken tests/docker/broken.expect
 
 - The test hosts and the incident data come from the [eMudhra incident tracker](https://emudhra.we-have-a-problem.com/).
 - [Stanislav Stolberg](https://github.com/stanistolberg): diagnostic hardening, regression tests and CI.
-- [Artsiom Lykau](https://github.com/artsiom-lykau): the Bun TLS check.
+- [Artsiom Lykau](https://github.com/artsiom-lykau): the Bun TLS check, and running the Node.js and Bun probes outside the current directory.
 
 <!-- TODO before publishing: credit the contributor who added Linux support. -->
 

@@ -9,7 +9,7 @@ umask 077
 export HOMEBREW_NO_AUTO_UPDATE=1
 
 # Versions 1 to 6 were used internally (certificate-check-vN.sh); 7.0.0 is the first public release.
-VERSION="7.3.0"
+VERSION="7.4.0"
 # The fixed versions below were checked on this date; newer releases may have shipped since.
 AS_OF="2026-10-25"
 TRACKER="https://emudhra.we-have-a-problem.com"
@@ -623,12 +623,13 @@ ACTIVE_NODE=""; ACTIVE_NODE_BAD=0; GOOD_BREW_NODE=""
 
 check_node() { # check_node NODE RESOLVED_PATH
   local n="$1" rp="$2" ver maj fixed out b c e ctl v where det note=""
-  ver=$("$n" --version 2>/dev/null </dev/null)
-  out=$("$n" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
+  # From $TMP, like Bun: version managers (volta, asdf, mise) pick the Node from the working directory.
+  ver=$(cd "$TMP" && "$n" --version 2>/dev/null </dev/null)
+  out=$(cd "$TMP" && "$n" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
   # An old Node exits at startup on a NODE_OPTIONS flag it does not know: probe it without them.
   if [ -z "$out" ] && [ -n "${NODE_OPTIONS:-}" ]; then
-    ver=$(env -u NODE_OPTIONS "$n" --version 2>/dev/null </dev/null)
-    out=$(env -u NODE_OPTIONS "$n" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
+    ver=$(cd "$TMP" && env -u NODE_OPTIONS "$n" --version 2>/dev/null </dev/null)
+    out=$(cd "$TMP" && env -u NODE_OPTIONS "$n" "$TMP/probe.js" "$CONTROL_URL" "${TEST_URLS[@]}" 2>/dev/null </dev/null | tail -1)
     [ -n "$out" ] && note=" (probed without NODE_OPTIONS, which this Node rejects)"
   fi
   ver=${ver#v}
@@ -954,6 +955,10 @@ while IFS= read -r n <&3; do
   rp=$(resolve "$n")
   case "$seen" in *"|$rp|"*) continue ;; esac
   seen="$seen$rp|"
+  # A node that links to Bun is tested in the Bun section. npm installs Bun as bin/bun.exe on every OS.
+  case "$rp" in */bun|*/bun.exe)
+    echo "  $(short "$n") is Bun: tested in the Bun section"; echo "$n" >> "$TMP/bun_nodes"; continue ;;
+  esac
   check_node "$n" "$rp"
 done 3< "$TMP/node_paths"
 [ "$seen" = "|" ] && echo "  Node.js not found"
@@ -969,7 +974,7 @@ fi
 
 section "Bun"
 # ~/.bun/bin is the installer's default and is often missing from a non-interactive PATH.
-{ type -ap bun 2>/dev/null; ls -1 "$HOME/.bun/bin/bun" "$BREW_PREFIX/opt/bun/bin/bun" 2>/dev/null; } | awk 'NF && !s[$0]++' > "$TMP/bun_paths"
+{ type -ap bun 2>/dev/null; ls -1 "$HOME/.bun/bin/bun" "$BREW_PREFIX/opt/bun/bin/bun" 2>/dev/null; cat "$TMP/bun_nodes" 2>/dev/null; } | awk 'NF && !s[$0]++' > "$TMP/bun_paths"
 seen="|"
 while IFS= read -r bn <&3; do
   [ -x "$bn" ] || continue
