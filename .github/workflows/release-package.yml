@@ -1,0 +1,32 @@
+name: Release package
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the source commit
+        run: |
+          bash -n emudhra-cli-trust-check.sh
+          shellcheck emudhra-cli-trust-check.sh
+          python3 tests/check.py
+          python3 tests/test_release_package.py
+      - name: Build two-file release package
+        run: python3 tools/build-release.py "$RUNNER_TEMP/emudhra-release"
+      - name: Verify packaged files
+        run: |
+          cd "$RUNNER_TEMP/emudhra-release"
+          shasum -a 256 -c SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: emudhra-cli-trust-check-${{ github.sha }}
+          path: ${{ runner.temp }}/emudhra-release/*
+          if-no-files-found: error

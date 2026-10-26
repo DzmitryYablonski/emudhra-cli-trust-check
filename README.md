@@ -189,6 +189,8 @@ This one focuses on the CLI tools and runtimes on a developer machine, and tests
 
 Tests and CI are development tooling only: `python3 tests/check.py`, `shellcheck emudhra-cli-trust-check.sh`. GitHub Actions runs these on macOS and Linux. Release users still need only the script and its single SHA-256 entry.
 
+The `Release package` workflow builds downloadable artifacts from one checked Git commit. Each artifact contains only the script and its matching `SHA256SUMS`; the commit SHA is in the artifact name and build log. It does not publish a GitHub release. Locally: `python3 tools/build-release.py /path/to/new-output-directory`.
+
 ## Credits
 
 The test hosts and the incident data come from the [eMudhra incident tracker](https://emudhra.we-have-a-problem.com/).
