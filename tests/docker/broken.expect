@@ -1,0 +1,12 @@
+# exit CODE, then VERDICT LABEL-SUBSTRING rows that must appear ("none VERDICT": no such rows).
+exit 1
+VULNERABLE /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+VULNERABLE curl
+VULNERABLE /usr/bin/python3
+VULNERABLE aws 2.35.15
+VULNERABLE node 20.
+VULNERABLE bun 1.3.9
+VULNERABLE ~/.curlrc
+VULNERABLE /opt/old-certifi/.venv
+VULNERABLE /opt/botocore-only/.venv
+OUTDATED Java 17.

@@ -26,3 +26,22 @@ jobs:
         run: python3 tests/check.py
       - name: Script integrity
         run: shasum -a 256 -c SHA256SUMS
+  e2e:
+    # Runs the real script in pinned fixture images against the incident's live test hosts.
+    # Non-blocking: an unreachable test host must not stop a merge.
+    name: e2e (${{ matrix.image }})
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [broken, fixed]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the ${{ matrix.image }} fixture
+        run: docker build -f tests/docker/${{ matrix.image }}.Dockerfile -t emudhra-e2e-${{ matrix.image }} tests/docker
+      - name: Run the check and compare verdicts
+        run: bash tests/docker/assert.sh emudhra-e2e-${{ matrix.image }} tests/docker/${{ matrix.image }}.expect
