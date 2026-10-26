@@ -1,0 +1,28 @@
+name: Bash checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bash syntax
+        run: bash -n emudhra-cli-trust-check.sh
+      - name: ShellCheck
+        if: runner.os == 'Linux'
+        run: shellcheck emudhra-cli-trust-check.sh
+      - name: Offline regressions and minimal release layout
+        run: python3 tests/check.py
+      - name: Script integrity
+        run: shasum -a 256 -c SHA256SUMS
