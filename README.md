@@ -14,7 +14,7 @@ The whole tool is one file: you download one file, check one hash, read one file
 - **One self-contained Bash file for macOS and Linux.** No modules, installers or helper files. A release ships only `emudhra-cli-trust-check.sh` and `SHA256SUMS`, and `SHA256SUMS` covers only that script.
 - **Read-only.** It never installs, updates, repairs or reconfigures anything. It prints the fix commands, and you decide whether to run them.
 - **Limited network use.** It connects only to the incident's test hosts and the control sites listed under [Limits](#limits). There is no telemetry, and no credentials are sent.
-- **Readable in one sitting.** It stays under 1,200 lines of Bash, so a new check has to be worth the lines it adds.
+- **Readable in one sitting.** It stays under 1,300 lines of Bash, so a new check has to be worth the lines it adds.
 - **Windows is not on `main`** until it can be tested on Windows.
 - **Everything else is for development.** The tests and CI are there for maintainers. You don't need to read or run them to use the tool.
 
@@ -182,6 +182,7 @@ This one focuses on the CLI tools and runtimes on a developer machine, and tests
 
 ## Version history
 
+- **7.3.0** (2026-10-26): Bun gets a real TLS test with the same probe as Node.js, and installs in `~/.bun/bin` and Homebrew are found too. The probe runs outside the current directory, so a project's `bunfig.toml` `preload` or `.env` cannot run.
 - **7.2.0** (2026-10-25): Java is judged by its `cacerts` content. No release fixes JDK-8395690 (CVE-2026-114820) yet, so any of the roots OpenJDK says to remove is `OUTDATED`, including emSign Root CA - G1 and G2, even when the TLS test passes. Releases older than October 2026 are `OUTDATED` too. New checks cover Perl Mozilla::CA and the versions of Bun, Deno, GitHub CLI, Docker CLI, conda and rustup. The README gained a list of related advisories.
 - **7.1.0** (2026-10-25): diagnostic hardening. Incomplete probes, malformed bundles and failed Java checks no longer pass. Probes have time limits and no longer pick up your git credentials, `.netrc` or `.curlrc`, and `~/.curlrc` is checked on its own for `insecure` and `cacert`. `--scan` prints only file names and line numbers. Environment variables that turn TLS verification off are reported. `VERSION_OK` marks version-only checks, and `--strict` adds exit codes 3 and 4. Regression tests and CI were added.
 - **7.0.0** (2026-10-24): the first public release. Compared with v6 it adds the AWS CLI check (TLS test, bundled `cacert.pem` and version) and botocore's fallback bundle in venvs without certifi. TLS tests also stop reporting OK once the test certificates expire.
@@ -193,8 +194,9 @@ Tests and CI are development tooling only: `python3 tests/check.py`, `shellcheck
 
 ## Credits
 
-The test hosts and the incident data come from the [eMudhra incident tracker](https://emudhra.we-have-a-problem.com/).
-[Stanislav Stolberg](https://github.com/stanistolberg) contributed diagnostic hardening, regression tests and CI.
+- The test hosts and the incident data come from the [eMudhra incident tracker](https://emudhra.we-have-a-problem.com/).
+- [Stanislav Stolberg](https://github.com/stanistolberg): diagnostic hardening, regression tests and CI.
+- [Artsiom Lykau](https://github.com/artsiom-lykau): the Bun TLS check.
 
 <!-- TODO before publishing: credit the contributor who added Linux support. -->
 
