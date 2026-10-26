@@ -188,6 +188,27 @@ class Diagnostics(unittest.TestCase):
             real = os.path.realpath(d)
             self.assertEqual(p.stdout.strip(), real + '|' + real, p.stderr)
 
+    def test_node_runs_outside_the_working_directory_and_skips_bun(self):
+        # A node that links to Bun is handed to the Bun section; a real one is probed from $TMP.
+        start = SOURCE.index('seen="|"', SOURCE.index('section "Node.js"'))
+        end = SOURCE.index('[ "$seen" = "|" ] && echo "  Node.js not found"', start)
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as project:
+            tmp, nodes = Path(d) / 'tmp', Path(d) / 'nodes'
+            tmp.mkdir(); (nodes / 'bun').mkdir(parents=True)
+            for fake in (nodes / 'node', nodes / 'bun' / 'bun'):
+                fake.write_text('#!/bin/sh\npwd -P >> "$TMP/cwd"\n')
+                fake.chmod(0o700)
+            (nodes / 'bun' / 'node').symlink_to('bun')
+            (tmp / 'node_paths').write_text(f'{nodes}/node\n{nodes}/bun/node\n')
+            code = ('TMP=$1; export TMP; CONTROL_URL=x; TEST_URLS=(); row() { :; }\n' + function('short') + '\n' +
+                    function('resolve') + '\n' + function('check_node') + '\n' + SOURCE[start:end])
+            p = subprocess.run(['bash', '-c', code, '--', str(tmp)], capture_output=True, text=True,
+                               timeout=10, cwd=project, env={k: v for k, v in os.environ.items() if k != 'NODE_OPTIONS'})
+            real = os.path.realpath(tmp)
+            self.assertEqual((tmp / 'cwd').read_text().split(), [real, real], p.stderr)
+            self.assertIn('/bun/node is Bun: tested in the Bun section', p.stdout)
+            self.assertEqual((tmp / 'bun_nodes').read_text(), f'{nodes}/bun/node\n')
+
     def test_requests_does_not_send_netrc_credentials_or_follow_redirects(self):
         namespace = {}
         with mock.patch.dict(os.environ, DISTRUSTED_ROOTS=ROOTS), mock.patch.object(sys, 'argv', ['probe', 'control']):
